@@ -1,0 +1,127 @@
+@import 'tailwindcss';
+@import '../../vendor/livewire/flux/dist/flux.css';
+
+@source '../views';
+@source '../../vendor/laravel/framework/src/Illuminate/Pagination/resources/views/*.blade.php';
+@source '../../vendor/livewire/flux-pro/stubs/**/*.blade.php';
+@source '../../vendor/livewire/flux/stubs/**/*.blade.php';
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+    --font-sans: 'Instrument Sans', ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji';
+
+    --color-zinc-50: #fafafa;
+    --color-zinc-100: #f5f5f5;
+    --color-zinc-200: #e5e5e5;
+    --color-zinc-300: #d4d4d4;
+    --color-zinc-400: #a3a3a3;
+    --color-zinc-500: #737373;
+    --color-zinc-600: #525252;
+    --color-zinc-700: #404040;
+    --color-zinc-800: #262626;
+    --color-zinc-900: #171717;
+    --color-zinc-950: #0a0a0a;
+
+    --color-accent: var(--color-neutral-800);
+    --color-accent-content: var(--color-neutral-800);
+    --color-accent-foreground: var(--color-white);
+}
+
+@layer theme {
+    .dark {
+        --color-accent: var(--color-white);
+        --color-accent-content: var(--color-white);
+        --color-accent-foreground: var(--color-neutral-800);
+    }
+}
+
+@layer base {
+
+    *,
+    ::after,
+    ::before,
+    ::backdrop,
+    ::file-selector-button {
+        border-color: var(--color-gray-200, currentColor);
+    }
+}
+
+
+[data-flux-label] {
+    @apply  !mb-0 !leading-tight;
+}
+
+input:focus[data-flux-control],
+textarea:focus[data-flux-control],
+select:focus[data-flux-control] {
+    @apply outline-hidden ring-2 ring-accent ring-offset-2 ring-offset-accent-foreground;
+}
+
+/* \[:where(&)\]:size-4 {
+    @apply size-4;
+} */
+
+/* Flux elementlerinin rounded'larını kaldır (switch hariç) */
+[data-flux-control]:not([data-flux-switch]):not([data-flux-toggle]),
+[data-flux-input],
+[data-flux-textarea],
+[data-flux-select],
+[data-flux-button],
+.flux-input,
+.flux-textarea,
+.flux-select,
+.flux-button {
+    border-radius: 0 !important;
+}
+
+/* Flux input wrapper'ları için (switch hariç) */
+[data-flux-field] input:not([data-flux-switch]):not([data-flux-toggle]),
+[data-flux-field] textarea,
+[data-flux-field] select,
+[data-flux-field] button:not([data-flux-switch]):not([data-flux-toggle]) {
+    border-radius: 0 !important;
+}
+
+/* Flux butonları için */
+button[data-flux-button] {
+    border-radius: 0 !important;
+}
+
+
+
+/* Form elementleri için amber renk sistemi */
+[data-flux-control]:focus,
+[data-flux-input]:focus,
+[data-flux-textarea]:focus,
+[data-flux-select]:focus,
+input:focus[data-flux-control],
+textarea:focus[data-flux-control],
+select:focus[data-flux-control] {
+    background-color: #fef3c7 !important; /* amber-200 */
+    border-color: #f59e0b !important; /* amber-500 */
+    outline: none !important;
+    box-shadow: 0 0 0 1px #fcd34d !important; /* amber-300 ring - ince */
+}
+
+/* Hover durumu için */
+[data-flux-control]:hover,
+[data-flux-input]:hover,
+[data-flux-textarea]:hover,
+[data-flux-select]:hover,
+input:hover[data-flux-control],
+textarea:hover[data-flux-control],
+select:hover[data-flux-control] {
+    background-color: #fef3c7 !important; /* amber-200 */
+}
+
+/* Active durumu için */
+[data-flux-control]:active,
+[data-flux-input]:active,
+[data-flux-textarea]:active,
+[data-flux-select]:active,
+input:active[data-flux-control],
+textarea:active[data-flux-control],
+select:active[data-flux-control] {
+    background-color: #fcd34d !important; /* amber-300 */
+}
