@@ -149,7 +149,7 @@ enum HizmetSonucu: string
     /**
      * Bu sonuç takip gerektirir mi?
      */
-    public function requiresFollowUp(): bool
+    public function needsFollowUp(): bool
     {
         return in_array($this, self::requiresFollowUp());
     }
@@ -168,7 +168,7 @@ enum HizmetSonucu: string
             'is_positive' => $case->isPositive(),
             'is_negative' => $case->isNegative(),
             'is_pending' => $case->isPending(),
-            'requires_follow_up' => $case->requiresFollowUp(),
+            'requires_follow_up' => $case->needsFollowUp(),
         ], self::cases());
     }
 

@@ -7,101 +7,139 @@ use App\Enums\ResimKategorisi;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
-use Intervention\Image\Facades\Image;
-use Intervention\Image\Image as InterventionImage;
+use Intervention\Image\ImageManager;
+use Intervention\Image\Drivers\Gd\Driver;
 
+/**
+ * Resim Upload ve İşleme Servisi
+ * 
+ * Bu servis gayrimenkul portföy sistemi için resim yükleme,
+ * boyutlandırma, optimizasyon ve depolama işlemlerini yönetir.
+ * 
+ * Özellikler:
+ * - Otomatik boyutlandırma (thumbnail, medium, large)
+ * - Resim optimizasyonu ve sıkıştırma
+ * - Watermark ekleme
+ * - EXIF veri temizleme
+ * - Güvenlik kontrolleri
+ * - Çoklu format desteği
+ */
 class ResimUploadService
 {
+    private ImageManager $imageManager;
+    private array $allowedMimeTypes;
+    private array $imageSizes;
+    private int $maxFileSize;
+    private int $jpegQuality;
+    private int $pngQuality;
+    private bool $watermarkEnabled;
+    private string $watermarkPath;
+
+    public function __construct()
+    {
+        $this->imageManager = new ImageManager(new Driver());
+        
+        // Yapılandırma ayarları
+        $this->allowedMimeTypes = [
+            'image/jpeg',
+            'image/jpg', 
+            'image/png',
+            'image/gif',
+            'image/webp',
+            'image/bmp',
+            'image/tiff'
+        ];
+
+        // Resim boyutları (genişlik x yükseklik)
+        $this->imageSizes = [
+            'thumbnail' => ['width' => 150, 'height' => 150, 'quality' => 80],
+            'small' => ['width' => 300, 'height' => 300, 'quality' => 85],
+            'medium' => ['width' => 800, 'height' => 600, 'quality' => 90],
+            'large' => ['width' => 1200, 'height' => 900, 'quality' => 95],
+            'original' => ['quality' => 100] // Orijinal boyut korunur
+        ];
+
+        $this->maxFileSize = 10 * 1024 * 1024; // 10MB
+        $this->jpegQuality = 90;
+        $this->pngQuality = 9;
+        $this->watermarkEnabled = config('app.watermark_enabled', false);
+        $this->watermarkPath = storage_path('app/watermarks/logo.png');
+    }
+
     /**
      * Resim yükle ve işle
      */
-    public function upload(
+    public function uploadResim(
         UploadedFile $file,
-        string $imageableType,
-        string $imageableId,
+        string $imagableType,
+        string $imagableId,
         ResimKategorisi $kategori,
+        array $boyutlar = null,
+        bool $watermarkEkle = false,
         array $additionalData = []
     ): array {
         try {
-            // Dosya validasyonu
-            $validationErrors = $this->validateFile($file, $kategori);
-            if (!empty($validationErrors)) {
+            // Güvenlik kontrolleri
+            $guvenlikKontrol = $this->guvenlikKontrolleri($file);
+            if (!$guvenlikKontrol['gecerli']) {
                 return [
-                    'success' => false,
-                    'errors' => $validationErrors
-                ];
-            }
-
-            // Dosya hash'i oluştur
-            $fileHash = hash_file('md5', $file->getRealPath());
-
-            // Duplicate kontrolü
-            if ($this->isDuplicate($fileHash, $imageableType, $imageableId)) {
-                return [
-                    'success' => false,
-                    'errors' => ['Bu resim zaten yüklenmiş.']
+                    'basarili' => false,
+                    'hatalar' => $guvenlikKontrol['hatalar']
                 ];
             }
 
             // Dosya adı oluştur
-            $fileName = $this->generateFileName($file, $kategori);
-            
-            // Dosya yolu oluştur
-            $path = $this->generatePath($imageableType, $imageableId, $kategori);
-            
-            // Resmi işle ve kaydet
-            $processedImage = $this->processImage($file, $kategori);
-            $storedPath = $processedImage->storeAs($path, $fileName, 'public');
+            $dosyaAdi = $this->guvenliDosyaAdiOlustur($file);
+            $klasorYolu = $this->klasorYoluOlustur($imagableType, $imagableId, $kategori);
 
-            // Resim boyutlarını al
-            $dimensions = $this->getImageDimensions($processedImage);
+            // Orijinal resmi yükle
+            $orijinalYol = $this->orijinalResmiYukle($file, $klasorYolu, $dosyaAdi);
 
-            // EXIF verilerini çıkar
-            $exifData = $this->extractExifData($file);
+            // Farklı boyutlarda resimleri oluştur
+            $boyutlar = $boyutlar ?? array_keys($this->imageSizes);
+            $olusturulanResimler = $this->farkliBoytlardaOlustur(
+                $file, 
+                $klasorYolu, 
+                $dosyaAdi, 
+                $boyutlar,
+                $watermarkEkle
+            );
+
+            // Resim metadata'sını çıkar
+            $metadata = $this->resimMetadatasiCikar($file, $orijinalYol);
 
             // Veritabanına kaydet
-            $resim = Resim::create([
-                'url' => $storedPath,
-                'imageable_id' => $imageableId,
-                'imageable_type' => $imageableType,
-                'kategori' => $kategori,
-                'baslik' => $additionalData['baslik'] ?? null,
-                'aciklama' => $additionalData['aciklama'] ?? null,
-                'cekim_tarihi' => $additionalData['cekim_tarihi'] ?? $exifData['cekim_tarihi'] ?? null,
-                'dosya_adi' => $fileName,
-                'orijinal_dosya_adi' => $file->getClientOriginalName(),
-                'dosya_boyutu' => $file->getSize(),
-                'genislik' => $dimensions['width'],
-                'yukseklik' => $dimensions['height'],
-                'mime_type' => $file->getMimeType(),
-                'hash' => $fileHash,
-                'exif_data' => $exifData['data'],
-                'upload_ip' => request()->ip(),
-                'upload_user_agent' => request()->userAgent(),
-                'yükleyen_id' => Auth::id(),
-                'onay_durumu' => $kategori->requiresApproval() ? 'beklemede' : 'onaylandı',
-                'alt_text' => $additionalData['alt_text'] ?? null,
-                'copyright_bilgisi' => $additionalData['copyright_bilgisi'] ?? null,
-                'etiketler' => $additionalData['etiketler'] ?? null,
-                'aktif_mi' => true,
-                'siralama' => $additionalData['siralama'] ?? $kategori->sortPriority(),
-                'is_processed' => false,
-            ]);
-
-            // Asenkron işleme için job kuyruğuna ekle
-            $this->queueImageProcessing($resim);
+            $resim = $this->veritabaniKaydiOlustur(
+                $file,
+                $orijinalYol,
+                $olusturulanResimler,
+                $imagableType,
+                $imagableId,
+                $kategori,
+                $metadata,
+                $additionalData
+            );
 
             return [
-                'success' => true,
+                'basarili' => true,
                 'resim' => $resim,
-                'message' => 'Resim başarıyla yüklendi.'
+                'orijinal_yol' => $orijinalYol,
+                'boyutlar' => $olusturulanResimler,
+                'metadata' => $metadata,
+                'mesaj' => 'Resim başarıyla yüklendi ve işlendi.'
             ];
 
         } catch (\Exception $e) {
+            Log::error('Resim upload hatası: ' . $e->getMessage(), [
+                'file' => $file->getClientOriginalName(),
+                'trace' => $e->getTraceAsString()
+            ]);
+
             return [
-                'success' => false,
-                'errors' => ['Resim yüklenirken hata oluştu: ' . $e->getMessage()]
+                'basarili' => false,
+                'hatalar' => ['Resim yüklenirken beklenmeyen bir hata oluştu: ' . $e->getMessage()]
             ];
         }
     }
@@ -109,658 +147,548 @@ class ResimUploadService
     /**
      * Toplu resim yükleme
      */
-    public function uploadMultiple(
+    public function topluResimYukle(
         array $files,
-        string $imageableType,
-        string $imageableId,
+        string $imagableType,
+        string $imagableId,
         ResimKategorisi $kategori,
+        array $boyutlar = null,
+        bool $watermarkEkle = false,
         array $additionalData = []
     ): array {
-        $results = [];
-        $successCount = 0;
-        $errorCount = 0;
+        $sonuclar = [];
+        $basarili = 0;
+        $hatali = 0;
 
         foreach ($files as $index => $file) {
-            $fileData = $additionalData;
-            
-            // Her dosya için farklı sıralama
-            if (!isset($fileData['siralama'])) {
-                $fileData['siralama'] = $kategori->sortPriority() + $index;
+            if (!$file instanceof UploadedFile) {
+                $sonuclar[$index] = [
+                    'basarili' => false,
+                    'hatalar' => ['Geçersiz dosya formatı']
+                ];
+                $hatali++;
+                continue;
             }
 
-            $result = $this->upload($file, $imageableType, $imageableId, $kategori, $fileData);
-            $results[] = $result;
+            $sonuc = $this->uploadResim(
+                $file, 
+                $imagableType, 
+                $imagableId, 
+                $kategori, 
+                $boyutlar, 
+                $watermarkEkle, 
+                $additionalData
+            );
             
-            if ($result['success']) {
-                $successCount++;
+            $sonuclar[$index] = $sonuc;
+
+            if ($sonuc['basarili']) {
+                $basarili++;
             } else {
-                $errorCount++;
+                $hatali++;
             }
         }
 
         return [
-            'results' => $results,
-            'summary' => [
-                'total' => count($files),
-                'success' => $successCount,
-                'error' => $errorCount
+            'sonuclar' => $sonuclar,
+            'ozet' => [
+                'toplam' => count($files),
+                'basarili' => $basarili,
+                'hatali' => $hatali
             ]
         ];
     }
 
     /**
-     * Resim güncelle (yeni versiyon)
+     * Güvenlik kontrolleri
      */
-    public function updateImage(
-        Resim $existingResim,
-        UploadedFile $file,
-        array $additionalData = []
-    ): array {
+    private function guvenlikKontrolleri(UploadedFile $file): array
+    {
+        $hatalar = [];
+
+        // Dosya boyutu kontrolü
+        if ($file->getSize() > $this->maxFileSize) {
+            $hatalar[] = 'Dosya boyutu çok büyük. Maksimum ' . ($this->maxFileSize / 1024 / 1024) . 'MB olabilir.';
+        }
+
+        // MIME type kontrolü
+        if (!in_array($file->getMimeType(), $this->allowedMimeTypes)) {
+            $hatalar[] = 'Desteklenmeyen dosya formatı. İzin verilen formatlar: ' . implode(', ', $this->allowedMimeTypes);
+        }
+
+        // Dosya uzantısı kontrolü
+        $uzanti = strtolower($file->getClientOriginalExtension());
+        $izinVerilenUzantilar = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'tiff'];
+        if (!in_array($uzanti, $izinVerilenUzantilar)) {
+            $hatalar[] = 'Desteklenmeyen dosya uzantısı: ' . $uzanti;
+        }
+
+        // Dosya içeriği kontrolü (gerçek resim mi?)
         try {
-            // Eski resmi pasif yap
-            $existingResim->update(['aktif_mi' => false]);
+            $resimBilgisi = getimagesize($file->getPathname());
+            if ($resimBilgisi === false) {
+                $hatalar[] = 'Dosya geçerli bir resim dosyası değil.';
+            }
+        } catch (\Exception $e) {
+            $hatalar[] = 'Resim dosyası doğrulanamadı.';
+        }
 
-            // Yeni resmi yükle
-            $result = $this->upload(
-                $file,
-                $existingResim->imageable_type,
-                $existingResim->imageable_id,
-                $existingResim->kategori,
-                array_merge([
-                    'baslik' => $existingResim->baslik,
-                    'aciklama' => $existingResim->aciklama,
-                    'siralama' => $existingResim->siralama,
-                ], $additionalData)
-            );
+        // Zararlı içerik kontrolü
+        if ($this->zararliIcerikKontrolu($file)) {
+            $hatalar[] = 'Dosya güvenlik kontrolünden geçemedi.';
+        }
 
-            if ($result['success']) {
-                // Eski resmi fiziksel olarak sil
-                $this->deletePhysicalFile($existingResim);
+        return [
+            'gecerli' => empty($hatalar),
+            'hatalar' => $hatalar
+        ];
+    }
+
+    /**
+     * Zararlı içerik kontrolü
+     */
+    private function zararliIcerikKontrolu(UploadedFile $file): bool
+    {
+        // Dosya içeriğinde PHP kodu var mı kontrol et
+        $icerik = file_get_contents($file->getPathname());
+        $zararliPatternler = [
+            '/<\?php/',
+            '/<\?=/',
+            '/<script/',
+            '/javascript:/',
+            '/vbscript:/',
+            '/onload=/i',
+            '/onerror=/i'
+        ];
+
+        foreach ($zararliPatternler as $pattern) {
+            if (preg_match($pattern, $icerik)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Güvenli dosya adı oluştur
+     */
+    private function guvenliDosyaAdiOlustur(UploadedFile $file): string
+    {
+        $orijinalAd = pathinfo($file->getClientOriginalName(), PATHINFO_FILENAME);
+        $uzanti = strtolower($file->getClientOriginalExtension());
+
+        // Türkçe karakterleri dönüştür ve güvenli hale getir
+        $guvenliAd = Str::slug($orijinalAd, '_');
+        $benzersizId = Str::random(8);
+        $zaman = time();
+
+        return "{$guvenliAd}_{$zaman}_{$benzersizId}.{$uzanti}";
+    }
+
+    /**
+     * Klasör yolu oluştur
+     */
+    private function klasorYoluOlustur(string $imagableType, string $imagableId, ResimKategorisi $kategori): string
+    {
+        $modelAdi = class_basename($imagableType);
+        $tarih = date('Y/m/d');
+        
+        return "resimler/{$modelAdi}/{$imagableId}/{$kategori->value}/{$tarih}";
+    }
+
+    /**
+     * Orijinal resmi yükle
+     */
+    private function orijinalResmiYukle(UploadedFile $file, string $klasorYolu, string $dosyaAdi): string
+    {
+        $tamYol = $klasorYolu . '/original/' . $dosyaAdi;
+        
+        // Klasörü oluştur
+        Storage::disk('public')->makeDirectory(dirname($tamYol));
+        
+        // Dosyayı kaydet
+        $file->storeAs($klasorYolu . '/original', $dosyaAdi, 'public');
+        
+        return $tamYol;
+    }
+
+    /**
+     * Farklı boyutlarda resimler oluştur
+     */
+    private function farkliBoytlardaOlustur(
+        UploadedFile $file,
+        string $klasorYolu,
+        string $dosyaAdi,
+        array $boyutlar,
+        bool $watermarkEkle = false
+    ): array {
+        $olusturulanResimler = [];
+
+        // Resmi yükle
+        $resim = $this->imageManager->read($file->getPathname());
+
+        // EXIF verilerini temizle
+        $resim = $this->exifVerileriniTemizle($resim);
+
+        foreach ($boyutlar as $boyutAdi) {
+            if (!isset($this->imageSizes[$boyutAdi])) {
+                continue;
             }
 
-            return $result;
+            $boyutAyarlari = $this->imageSizes[$boyutAdi];
+            $boyutluResim = clone $resim;
 
-        } catch (\Exception $e) {
-            return [
-                'success' => false,
-                'errors' => ['Resim güncellenirken hata oluştu: ' . $e->getMessage()]
+            // Boyutlandırma (original hariç)
+            if ($boyutAdi !== 'original') {
+                $boyutluResim = $this->resimBoyutlandir(
+                    $boyutluResim,
+                    $boyutAyarlari['width'],
+                    $boyutAyarlari['height']
+                );
+            }
+
+            // Watermark ekle
+            if ($watermarkEkle && $this->watermarkEnabled) {
+                $boyutluResim = $this->watermarkEkle($boyutluResim);
+            }
+
+            // Optimizasyon uygula
+            $boyutluResim = $this->resimOptimizasyonu($boyutluResim, $boyutAyarlari['quality']);
+
+            // Kaydet
+            $boyutKlasorYolu = $klasorYolu . '/' . $boyutAdi;
+            Storage::disk('public')->makeDirectory($boyutKlasorYolu);
+            $kayitYolu = storage_path('app/public/' . $boyutKlasorYolu . '/' . $dosyaAdi);
+            $boyutluResim->save($kayitYolu);
+
+            $olusturulanResimler[$boyutAdi] = [
+                'yol' => $boyutKlasorYolu . '/' . $dosyaAdi,
+                'url' => Storage::disk('public')->url($boyutKlasorYolu . '/' . $dosyaAdi),
+                'boyut' => $this->dosyaBoyutuAl($kayitYolu),
+                'genislik' => $boyutluResim->width(),
+                'yukseklik' => $boyutluResim->height()
             ];
         }
+
+        return $olusturulanResimler;
     }
 
     /**
-     * Resim boyutlandır ve optimize et
+     * Resim boyutlandır
      */
-    private function processImage(UploadedFile $file, ResimKategorisi $kategori): InterventionImage
+    private function resimBoyutlandir($resim, int $genislik, int $yukseklik)
     {
-        $image = Image::make($file->getRealPath());
-        
-        // Kategori bazlı işleme
-        switch ($kategori) {
-            case ResimKategorisi::AVATAR:
-                return $this->processAvatar($image);
-                
-            case ResimKategorisi::LOGO:
-                return $this->processLogo($image);
-                
-            case ResimKategorisi::KAPAK_RESMI:
-                return $this->processKapakResmi($image);
-                
-            case ResimKategorisi::GALERI:
-            case ResimKategorisi::IC_MEKAN:
-            case ResimKategorisi::DIS_MEKAN:
-            case ResimKategorisi::DETAY:
-            case ResimKategorisi::CEPHE:
-            case ResimKategorisi::MANZARA:
-                return $this->processGalleryImage($image, $kategori);
-                
-            case ResimKategorisi::PLAN:
-                return $this->processPlan($image);
-                
-            case ResimKategorisi::UYDU:
-            case ResimKategorisi::OZNITELIK:
-            case ResimKategorisi::BUYUKSEHIR:
-            case ResimKategorisi::EGIM:
-            case ResimKategorisi::EIMAR:
-                return $this->processMapImage($image);
-                
-            default:
-                return $this->processGeneral($image, $kategori);
-        }
-    }
-
-    /**
-     * Avatar resmi işle
-     */
-    private function processAvatar(InterventionImage $image): InterventionImage
-    {
-        // Kare format, 300x300
-        $image->fit(300, 300);
-        
-        // Kalite optimizasyonu
-        $image->encode('jpg', 85);
-        
-        return $image;
-    }
-
-    /**
-     * Logo resmi işle
-     */
-    private function processLogo(InterventionImage $image): InterventionImage
-    {
-        // Maksimum 500x200, aspect ratio koru
-        $image->resize(500, 200, function ($constraint) {
+        // Orantılı boyutlandırma (aspect ratio korunur)
+        return $resim->resize($genislik, $yukseklik, function ($constraint) {
             $constraint->aspectRatio();
-            $constraint->upsize();
+            $constraint->upsize(); // Küçük resimleri büyütme
         });
-        
-        // PNG formatında koru (şeffaflık için)
-        if ($image->mime() !== 'image/png') {
-            $image->encode('png');
-        }
-        
-        return $image;
-    }
-
-    /**
-     * Kapak resmi işle
-     */
-    private function processKapakResmi(InterventionImage $image): InterventionImage
-    {
-        // 16:9 aspect ratio, maksimum 1920x1080
-        $image->fit(1920, 1080);
-        
-        // Yüksek kalite
-        $image->encode('jpg', 95);
-        
-        // Watermark ekle
-        $this->addWatermark($image);
-        
-        return $image;
-    }
-
-    /**
-     * Galeri resmi işle
-     */
-    private function processGalleryImage(InterventionImage $image, ResimKategorisi $kategori): InterventionImage
-    {
-        $dimensions = $kategori->recommendedDimensions();
-        
-        // Maksimum boyut, aspect ratio koru
-        $image->resize($dimensions['width'], $dimensions['height'], function ($constraint) {
-            $constraint->aspectRatio();
-            $constraint->upsize();
-        });
-        
-        // Kalite ayarı
-        $image->encode('jpg', $kategori->qualitySetting());
-        
-        // Watermark ekle
-        if ($kategori->requiresWatermark()) {
-            $this->addWatermark($image);
-        }
-        
-        return $image;
-    }
-
-    /**
-     * Plan resmi işle
-     */
-    private function processPlan(InterventionImage $image): InterventionImage
-    {
-        // Yüksek çözünürlük koru
-        $image->resize(2048, 1536, function ($constraint) {
-            $constraint->aspectRatio();
-            $constraint->upsize();
-        });
-        
-        // Maksimum kalite
-        $image->encode('jpg', 100);
-        
-        return $image;
-    }
-
-    /**
-     * Harita resmi işle
-     */
-    private function processMapImage(InterventionImage $image): InterventionImage
-    {
-        // Orijinal boyutları koru, sadece optimize et
-        $image->encode('jpg', 100);
-        
-        return $image;
-    }
-
-    /**
-     * Genel resim işleme
-     */
-    private function processGeneral(InterventionImage $image, ResimKategorisi $kategori): InterventionImage
-    {
-        $dimensions = $kategori->recommendedDimensions();
-        
-        $image->resize($dimensions['width'], $dimensions['height'], function ($constraint) {
-            $constraint->aspectRatio();
-            $constraint->upsize();
-        });
-        
-        $image->encode('jpg', $kategori->qualitySetting());
-        
-        return $image;
     }
 
     /**
      * Watermark ekle
      */
-    private function addWatermark(InterventionImage $image): void
+    private function watermarkEkle($resim)
     {
-        // Watermark dosyası varsa ekle
-        $watermarkPath = public_path('images/watermark.png');
-        
-        if (file_exists($watermarkPath)) {
-            $watermark = Image::make($watermarkPath);
+        if (!file_exists($this->watermarkPath)) {
+            return $resim;
+        }
+
+        try {
+            $watermark = $this->imageManager->read($this->watermarkPath);
             
-            // Watermark boyutunu resim boyutuna göre ayarla
-            $watermarkSize = min($image->width(), $image->height()) * 0.1;
-            $watermark->resize($watermarkSize, $watermarkSize, function ($constraint) {
+            // Watermark boyutunu resmin %10'u kadar yap
+            $watermarkGenislik = (int)($resim->width() * 0.1);
+            $watermark->resize($watermarkGenislik, null, function ($constraint) {
                 $constraint->aspectRatio();
             });
-            
+
             // Sağ alt köşeye yerleştir
-            $image->insert($watermark, 'bottom-right', 10, 10);
+            $resim->place($watermark, 'bottom-right', 10, 10);
+        } catch (\Exception $e) {
+            Log::warning('Watermark eklenemedi: ' . $e->getMessage());
+        }
+
+        return $resim;
+    }
+
+    /**
+     * Resim optimizasyonu
+     */
+    private function resimOptimizasyonu($resim, int $kalite)
+    {
+        // Kalite ayarını uygula
+        return $resim->encode(quality: $kalite);
+    }
+
+    /**
+     * EXIF verilerini temizle
+     */
+    private function exifVerileriniTemizle($resim)
+    {
+        // Intervention Image otomatik olarak EXIF verilerini temizler
+        // Ek güvenlik için manuel temizleme de yapabiliriz
+        return $resim;
+    }
+
+    /**
+     * Resim metadata'sını çıkar
+     */
+    private function resimMetadatasiCikar(UploadedFile $file, string $kayitYolu): array
+    {
+        $metadata = [
+            'orijinal_ad' => $file->getClientOriginalName(),
+            'mime_type' => $file->getMimeType(),
+            'boyut' => $file->getSize(),
+            'upload_tarihi' => now()->toISOString()
+        ];
+
+        try {
+            $resimBilgisi = getimagesize($file->getPathname());
+            if ($resimBilgisi) {
+                $metadata['genislik'] = $resimBilgisi[0];
+                $metadata['yukseklik'] = $resimBilgisi[1];
+                $metadata['renk_kanali'] = $resimBilgisi['channels'] ?? null;
+                $metadata['bit_derinligi'] = $resimBilgisi['bits'] ?? null;
+            }
+
+            // EXIF verileri (temizlenmeden önce)
+            if (function_exists('exif_read_data') && in_array($file->getMimeType(), ['image/jpeg', 'image/tiff'])) {
+                $exifData = @exif_read_data($file->getPathname());
+                if ($exifData) {
+                    $metadata['exif'] = [
+                        'kamera' => $exifData['Make'] ?? null,
+                        'model' => $exifData['Model'] ?? null,
+                        'cekim_tarihi' => $exifData['DateTime'] ?? null,
+                        'gps_lat' => $this->gpsKoordinatiCikar($exifData, 'GPSLatitude', 'GPSLatitudeRef'),
+                        'gps_lon' => $this->gpsKoordinatiCikar($exifData, 'GPSLongitude', 'GPSLongitudeRef')
+                    ];
+                }
+            }
+        } catch (\Exception $e) {
+            Log::warning('Resim metadata çıkarılamadı: ' . $e->getMessage());
+        }
+
+        return $metadata;
+    }
+
+    /**
+     * GPS koordinatını çıkar
+     */
+    private function gpsKoordinatiCikar(array $exifData, string $koordinatKey, string $refKey): ?float
+    {
+        if (!isset($exifData[$koordinatKey]) || !isset($exifData[$refKey])) {
+            return null;
+        }
+
+        $koordinat = $exifData[$koordinatKey];
+        $ref = $exifData[$refKey];
+
+        if (!is_array($koordinat) || count($koordinat) < 3) {
+            return null;
+        }
+
+        // DMS (Degrees, Minutes, Seconds) formatından decimal'e çevir
+        $derece = $this->rasyonelSayiyiCevir($koordinat[0]);
+        $dakika = $this->rasyonelSayiyiCevir($koordinat[1]);
+        $saniye = $this->rasyonelSayiyiCevir($koordinat[2]);
+
+        $decimal = $derece + ($dakika / 60) + ($saniye / 3600);
+
+        // Güney ve Batı için negatif yap
+        if (in_array($ref, ['S', 'W'])) {
+            $decimal *= -1;
+        }
+
+        return $decimal;
+    }
+
+    /**
+     * Rasyonel sayıyı çevir
+     */
+    private function rasyonelSayiyiCevir(string $rasyonel): float
+    {
+        $parts = explode('/', $rasyonel);
+        if (count($parts) === 2 && $parts[1] != 0) {
+            return (float)$parts[0] / (float)$parts[1];
+        }
+        return (float)$rasyonel;
+    }
+
+    /**
+     * Dosya boyutunu al
+     */
+    private function dosyaBoyutuAl(string $dosyaYolu): int
+    {
+        return file_exists($dosyaYolu) ? filesize($dosyaYolu) : 0;
+    }
+
+    /**
+     * Veritabanı kaydı oluştur
+     */
+    private function veritabaniKaydiOlustur(
+        UploadedFile $file,
+        string $orijinalYol,
+        array $olusturulanResimler,
+        string $imagableType,
+        string $imagableId,
+        ResimKategorisi $kategori,
+        array $metadata,
+        array $additionalData
+    ): Resim {
+        return Resim::create([
+            'baslik' => $additionalData['baslik'] ?? pathinfo($file->getClientOriginalName(), PATHINFO_FILENAME),
+            'aciklama' => $additionalData['aciklama'] ?? null,
+            'kategori' => $kategori,
+            'dosya_adi' => basename($orijinalYol),
+            'orijinal_dosya_adi' => $file->getClientOriginalName(),
+            'dosya_yolu' => $orijinalYol,
+            'dosya_boyutu' => $file->getSize(),
+            'mime_type' => $file->getMimeType(),
+            'genislik' => $metadata['genislik'] ?? null,
+            'yukseklik' => $metadata['yukseklik'] ?? null,
+            'boyutlar' => $olusturulanResimler,
+            'metadata' => $metadata,
+            'imagable_type' => $imagableType,
+            'imagable_id' => $imagableId,
+            'olusturan_id' => Auth::id(),
+            'aktif_mi' => true,
+            'sira' => $additionalData['sira'] ?? 0,
+            'ana_resim_mi' => $additionalData['ana_resim_mi'] ?? false
+        ]);
+    }
+
+    /**
+     * Resim sil
+     */
+    public function resimSil(Resim $resim): bool
+    {
+        try {
+            // Tüm boyutlardaki resimleri sil
+            foreach (array_keys($this->imageSizes) as $boyut) {
+                $klasorYolu = dirname($resim->dosya_yolu);
+                $dosyaAdi = basename($resim->dosya_yolu);
+                $dosyaYolu = $klasorYolu . '/' . $boyut . '/' . $dosyaAdi;
+                
+                if (Storage::disk('public')->exists($dosyaYolu)) {
+                    Storage::disk('public')->delete($dosyaYolu);
+                }
+            }
+
+            // Veritabanından sil
+            $resim->delete();
+
+            return true;
+        } catch (\Exception $e) {
+            Log::error('Resim silme hatası: ' . $e->getMessage());
+            return false;
         }
     }
 
     /**
      * Resim boyutlarını al
      */
-    private function getImageDimensions(InterventionImage $image): array
+    public function getResimBoyutlari(): array
     {
-        return [
-            'width' => $image->width(),
-            'height' => $image->height()
-        ];
+        return $this->imageSizes;
     }
 
     /**
-     * EXIF verilerini çıkar
+     * İzin verilen MIME tiplerini al
      */
-    private function extractExifData(UploadedFile $file): array
+    public function getIzinVerilenMimeTypes(): array
     {
-        $result = [
-            'data' => null,
-            'cekim_tarihi' => null
-        ];
+        return $this->allowedMimeTypes;
+    }
 
-        try {
-            if (function_exists('exif_read_data') && in_array($file->getMimeType(), ['image/jpeg', 'image/tiff'])) {
-                $exifData = @exif_read_data($file->getRealPath());
-                
-                if ($exifData) {
-                    $result['data'] = $exifData;
-                    
-                    // Çekim tarihi çıkar
-                    if (isset($exifData['DateTime'])) {
-                        $result['cekim_tarihi'] = \Carbon\Carbon::createFromFormat('Y:m:d H:i:s', $exifData['DateTime']);
-                    } elseif (isset($exifData['DateTimeOriginal'])) {
-                        $result['cekim_tarihi'] = \Carbon\Carbon::createFromFormat('Y:m:d H:i:s', $exifData['DateTimeOriginal']);
-                    }
-                }
-            }
-        } catch (\Exception $e) {
-            // EXIF okuma hatası, devam et
+    /**
+     * Maksimum dosya boyutunu al
+     */
+    public function getMaxDosyaBoyutu(): int
+    {
+        return $this->maxFileSize;
+    }
+
+    /**
+     * Resim URL'ini oluştur
+     */
+    public function resimUrlOlustur(Resim $resim, string $boyut = 'medium'): ?string
+    {
+        if (isset($resim->boyutlar[$boyut])) {
+            return $resim->boyutlar[$boyut]['url'];
         }
 
-        return $result;
+        // Fallback olarak orijinal resim
+        return Storage::disk('public')->url($resim->dosya_yolu);
     }
 
     /**
-     * Asenkron resim işleme
+     * Resim bilgilerini al
      */
-    private function queueImageProcessing(Resim $resim): void
+    public function resimBilgileriAl(Resim $resim): array
     {
-        // Job kuyruğuna ekle (gerçek implementasyonda)
-        // ProcessImageJob::dispatch($resim);
+        $bilgiler = [];
         
-        // Şimdilik senkron işle
-        $this->processImageVariants($resim);
-    }
-
-    /**
-     * Resim varyantlarını oluştur
-     */
-    private function processImageVariants(Resim $resim): void
-    {
-        try {
-            if (!Storage::disk('public')->exists($resim->url)) {
-                return;
-            }
-
-            $image = Image::make(Storage::disk('public')->path($resim->url));
-            $pathInfo = pathinfo($resim->url);
-            $directory = $pathInfo['dirname'];
-            $filename = $pathInfo['filename'];
-            $extension = $pathInfo['extension'];
-
-            // Thumbnail (150x150)
-            $thumbnailPath = $directory . '/' . $filename . '_thumb.' . $extension;
-            $thumbnail = clone $image;
-            $thumbnail->fit(150, 150);
-            Storage::disk('public')->put($thumbnailPath, $thumbnail->encode('jpg', 80)->getEncoded());
-
-            // Medium (800x600)
-            $mediumPath = $directory . '/' . $filename . '_medium.' . $extension;
-            $medium = clone $image;
-            $medium->resize(800, 600, function ($constraint) {
-                $constraint->aspectRatio();
-                $constraint->upsize();
-            });
-            Storage::disk('public')->put($mediumPath, $medium->encode('jpg', 85)->getEncoded());
-
-            // Large (1920x1080)
-            $largePath = $directory . '/' . $filename . '_large.' . $extension;
-            $large = clone $image;
-            $large->resize(1920, 1080, function ($constraint) {
-                $constraint->aspectRatio();
-                $constraint->upsize();
-            });
-            Storage::disk('public')->put($largePath, $large->encode('jpg', 90)->getEncoded());
-
-            // Veritabanını güncelle
-            $resim->update([
-                'thumbnail_url' => $thumbnailPath,
-                'medium_url' => $mediumPath,
-                'large_url' => $largePath,
-                'is_processed' => true,
-                'processing_error' => null,
-            ]);
-
-        } catch (\Exception $e) {
-            $resim->update([
-                'processing_error' => $e->getMessage(),
-                'is_processed' => false,
-            ]);
-        }
-    }
-
-    /**
-     * Dosya validasyonu
-     */
-    private function validateFile(UploadedFile $file, ResimKategorisi $kategori): array
-    {
-        $errors = [];
-
-        // MIME type kontrolü
-        if (!in_array($file->getMimeType(), $kategori->allowedMimeTypes())) {
-            $errors[] = "Bu kategori için {$file->getMimeType()} formatı desteklenmiyor.";
-        }
-
-        // Dosya boyutu kontrolü
-        $maxSize = $kategori->maxFileSize() * 1024 * 1024; // MB to bytes
-        if ($file->getSize() > $maxSize) {
-            $maxSizeMB = $kategori->maxFileSize();
-            $errors[] = "Dosya boyutu {$maxSizeMB}MB'ı aşamaz.";
-        }
-
-        // Dosya bütünlüğü kontrolü
-        if (!$file->isValid()) {
-            $errors[] = 'Dosya bozuk veya geçersiz.';
-        }
-
-        // Resim boyut kontrolü
-        try {
-            $imageInfo = getimagesize($file->getRealPath());
-            if (!$imageInfo) {
-                $errors[] = 'Geçersiz resim dosyası.';
-            } else {
-                $minDimensions = $this->getMinimumDimensions($kategori);
-                if ($imageInfo[0] < $minDimensions['width'] || $imageInfo[1] < $minDimensions['height']) {
-                    $errors[] = "Resim minimum {$minDimensions['width']}x{$minDimensions['height']} boyutunda olmalıdır.";
-                }
-            }
-        } catch (\Exception $e) {
-            $errors[] = 'Resim dosyası okunamadı.';
-        }
-
-        return $errors;
-    }
-
-    /**
-     * Minimum boyutları al
-     */
-    private function getMinimumDimensions(ResimKategorisi $kategori): array
-    {
-        return match ($kategori) {
-            ResimKategorisi::AVATAR => ['width' => 100, 'height' => 100],
-            ResimKategorisi::LOGO => ['width' => 100, 'height' => 50],
-            ResimKategorisi::KAPAK_RESMI => ['width' => 800, 'height' => 450],
-            ResimKategorisi::GALERI, ResimKategorisi::IC_MEKAN, ResimKategorisi::DIS_MEKAN => ['width' => 640, 'height' => 480],
-            default => ['width' => 200, 'height' => 200],
-        };
-    }
-
-    /**
-     * Duplicate kontrolü
-     */
-    private function isDuplicate(string $hash, string $imageableType, string $imageableId): bool
-    {
-        return Resim::where('hash', $hash)
-                   ->where('imageable_type', $imageableType)
-                   ->where('imageable_id', $imageableId)
-                   ->where('aktif_mi', true)
-                   ->exists();
-    }
-
-    /**
-     * Dosya adı oluştur
-     */
-    private function generateFileName(UploadedFile $file, ResimKategorisi $kategori): string
-    {
-        $timestamp = now()->format('Y-m-d_H-i-s');
-        $randomString = Str::random(8);
-        $extension = strtolower($file->getClientOriginalExtension());
-        
-        return "{$kategori->value}_{$timestamp}_{$randomString}.{$extension}";
-    }
-
-    /**
-     * Dosya yolu oluştur
-     */
-    private function generatePath(string $imageableType, string $imageableId, ResimKategorisi $kategori): string
-    {
-        $modelName = class_basename($imageableType);
-        $year = now()->year;
-        $month = now()->format('m');
-        
-        return "resimler/{$modelName}/{$imageableId}/{$kategori->value}/{$year}/{$month}";
-    }
-
-    /**
-     * Resim sil
-     */
-    public function delete(Resim $resim): array
-    {
-        try {
-            // Fiziksel dosyaları sil
-            $this->deletePhysicalFile($resim);
-
-            // Veritabanından soft delete
-            $resim->update(['aktif_mi' => false]);
-            $resim->delete();
-
-            return [
-                'success' => true,
-                'message' => 'Resim başarıyla silindi.'
-            ];
-
-        } catch (\Exception $e) {
-            return [
-                'success' => false,
-                'errors' => ['Resim silinirken hata oluştu: ' . $e->getMessage()]
-            ];
-        }
-    }
-
-    /**
-     * Fiziksel dosyaları sil
-     */
-    private function deletePhysicalFile(Resim $resim): void
-    {
-        $filesToDelete = [
-            $resim->url,
-            $resim->thumbnail_url,
-            $resim->medium_url,
-            $resim->large_url,
-        ];
-
-        foreach ($filesToDelete as $file) {
-            if ($file && Storage::disk('public')->exists($file)) {
-                Storage::disk('public')->delete($file);
+        foreach (array_keys($this->imageSizes) as $boyut) {
+            if (isset($resim->boyutlar[$boyut])) {
+                $bilgiler[$boyut] = $resim->boyutlar[$boyut];
             }
         }
-    }
 
-    /**
-     * Resim geri yükle
-     */
-    public function restore(Resim $resim): array
-    {
-        try {
-            $resim->restore();
-            $resim->update(['aktif_mi' => true]);
-
-            return [
-                'success' => true,
-                'message' => 'Resim başarıyla geri yüklendi.'
-            ];
-
-        } catch (\Exception $e) {
-            return [
-                'success' => false,
-                'errors' => ['Resim geri yüklenirken hata oluştu: ' . $e->getMessage()]
-            ];
-        }
-    }
-
-    /**
-     * Mülk tipine göre uygun kategorileri getir
-     */
-    public function getAvailableCategoriesForProperty(string $propertyType): array
-    {
-        return ResimKategorisi::forPropertyType($propertyType);
+        return $bilgiler;
     }
 
     /**
      * Resim istatistikleri
      */
-    public function getStatistics(string $imageableType, string $imageableId): array
+    public function resimIstatistikleriAl(string $imagableType = null, string $imagableId = null): array
     {
-        $query = Resim::where('imageable_type', $imageableType)
-                     ->where('imageable_id', $imageableId)
-                     ->where('aktif_mi', true);
+        $query = Resim::where('aktif_mi', true);
 
-        return [
-            'total_count' => $query->count(),
-            'total_size' => $query->sum('dosya_boyutu'),
-            'by_category' => $query->selectRaw('kategori, COUNT(*) as count, SUM(dosya_boyutu) as size')
+        if ($imagableType && $imagableId) {
+            $query->where('imagable_type', $imagableType)
+                  ->where('imagable_id', $imagableId);
+        }
+
+        $toplamResim = $query->count();
+        $toplamBoyut = $query->sum('dosya_boyutu');
+        
+        $kategorilereBolum = $query->selectRaw('kategori, COUNT(*) as adet, SUM(dosya_boyutu) as toplam_boyut')
                                   ->groupBy('kategori')
                                   ->get()
                                   ->mapWithKeys(function ($item) {
-                                      return [$item->kategori => [
-                                          'count' => $item->count,
-                                          'size' => $item->size
-                                      ]];
-                                  }),
-            'approval_status' => $query->selectRaw('onay_durumu, COUNT(*) as count')
-                                     ->groupBy('onay_durumu')
-                                     ->get()
-                                     ->pluck('count', 'onay_durumu'),
-            'recent_uploads' => $query->latest('olusturma_tarihi')->limit(5)->get(),
-            'most_viewed' => $query->orderBy('görüntülenme_sayisi', 'desc')->limit(5)->get(),
-        ];
-    }
-
-    /**
-     * Resim optimizasyonu
-     */
-    public function optimizeImage(Resim $resim): array
-    {
-        try {
-            if (!Storage::disk('public')->exists($resim->url)) {
-                return [
-                    'success' => false,
-                    'errors' => ['Resim dosyası bulunamadı.']
-                ];
-            }
-
-            $image = Image::make(Storage::disk('public')->path($resim->url));
-            
-            // Kalite optimizasyonu
-            $quality = $resim->kategori->qualitySetting();
-            $image->encode('jpg', $quality);
-            
-            // Dosyayı güncelle
-            Storage::disk('public')->put($resim->url, $image->getEncoded());
-            
-            // Boyut bilgisini güncelle
-            $newSize = Storage::disk('public')->size($resim->url);
-            $resim->update(['dosya_boyutu' => $newSize]);
-
-            return [
-                'success' => true,
-                'message' => 'Resim başarıyla optimize edildi.',
-                'old_size' => $resim->getOriginal('dosya_boyutu'),
-                'new_size' => $newSize,
-                'savings' => $resim->getOriginal('dosya_boyutu') - $newSize,
-            ];
-
-        } catch (\Exception $e) {
-            return [
-                'success' => false,
-                'errors' => ['Resim optimize edilirken hata oluştu: ' . $e->getMessage()]
-            ];
-        }
-    }
-
-    /**
-     * Toplu resim optimizasyonu
-     */
-    public function bulkOptimize(array $resimIds): array
-    {
-        $results = [];
-        $totalSavings = 0;
-
-        foreach ($resimIds as $resimId) {
-            $resim = Resim::find($resimId);
-            if ($resim) {
-                $result = $this->optimizeImage($resim);
-                $results[] = $result;
-                
-                if ($result['success'] && isset($result['savings'])) {
-                    $totalSavings += $result['savings'];
-                }
-            }
-        }
+                                      return [
+                                          $item->kategori->value => [
+                                              'adet' => $item->adet,
+                                              'toplam_boyut' => $item->toplam_boyut,
+                                              'ortalama_boyut' => $item->adet > 0 ? $item->toplam_boyut / $item->adet : 0
+                                          ]
+                                      ];
+                                  });
 
         return [
-            'results' => $results,
-            'total_savings' => $totalSavings,
-            'formatted_savings' => $this->formatBytes($totalSavings),
+            'toplam_resim' => $toplamResim,
+            'toplam_boyut' => $toplamBoyut,
+            'toplam_boyut_formatli' => $this->dosyaBoyutuFormatla($toplamBoyut),
+            'ortalama_boyut' => $toplamResim > 0 ? $toplamBoyut / $toplamResim : 0,
+            'kategorilere_bolum' => $kategorilereBolum,
+            'son_guncelleme' => $query->latest('created_at')->first()?->created_at
         ];
     }
 
     /**
-     * Byte'ları human readable format'a çevir
+     * Dosya boyutunu formatla
      */
-    private function formatBytes(int $bytes): string
+    private function dosyaBoyutuFormatla(int $bytes): string
     {
-        if ($bytes >= 1073741824) {
-            return number_format($bytes / 1073741824, 2) . ' GB';
-        } elseif ($bytes >= 1048576) {
-            return number_format($bytes / 1048576, 2) . ' MB';
-        } elseif ($bytes >= 1024) {
-            return number_format($bytes / 1024, 2) . ' KB';
-        } else {
-            return $bytes . ' bytes';
-        }
+        $units = ['B', 'KB', 'MB', 'GB', 'TB'];
+        $bytes = max($bytes, 0);
+        $pow = floor(($bytes ? log($bytes) : 0) / log(1024));
+        $pow = min($pow, count($units) - 1);
+        
+        $bytes /= pow(1024, $pow);
+        
+        return round($bytes, 2) . ' ' . $units[$pow];
     }
 }

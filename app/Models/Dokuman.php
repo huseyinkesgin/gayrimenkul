@@ -3,9 +3,12 @@
 namespace App\Models;
 
 use App\Enums\DokumanTipi;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
 
 class Dokuman extends BaseModel
 {
+    use HasFactory;
+    
     protected $table = 'dokumanlar';
 
     protected $fillable = [

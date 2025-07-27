@@ -186,15 +186,32 @@ class DokumanUploadService
     }
 
     /**
-     * Dosya validasyonu
+     * Gelişmiş dosya validasyonu ve güvenlik kontrolleri
      */
     private function validateFile(UploadedFile $file, DokumanTipi $dokumanTipi): array
     {
         $errors = [];
 
+        // Dosya bütünlüğü kontrolü
+        if (!$file->isValid()) {
+            $errors[] = 'Dosya bozuk veya geçersiz.';
+            return $errors;
+        }
+
         // MIME type kontrolü
-        if (!in_array($file->getMimeType(), $dokumanTipi->allowedMimeTypes())) {
-            $errors[] = "Bu döküman tipi için {$file->getMimeType()} formatı desteklenmiyor.";
+        $detectedMimeType = $file->getMimeType();
+        $allowedMimeTypes = $dokumanTipi->allowedMimeTypes();
+        
+        if (!in_array($detectedMimeType, $allowedMimeTypes)) {
+            $errors[] = "Bu döküman tipi için {$detectedMimeType} formatı desteklenmiyor.";
+        }
+
+        // Dosya uzantısı kontrolü (MIME type spoofing koruması)
+        $fileExtension = strtolower($file->getClientOriginalExtension());
+        $expectedExtensions = $this->getMimeTypeExtensions($detectedMimeType);
+        
+        if (!in_array($fileExtension, $expectedExtensions)) {
+            $errors[] = "Dosya uzantısı ({$fileExtension}) MIME type ile uyumlu değil.";
         }
 
         // Dosya boyutu kontrolü
@@ -204,9 +221,301 @@ class DokumanUploadService
             $errors[] = "Dosya boyutu {$maxSizeMB}MB'ı aşamaz.";
         }
 
-        // Dosya bütünlüğü kontrolü
-        if (!$file->isValid()) {
-            $errors[] = 'Dosya bozuk veya geçersiz.';
+        // Minimum dosya boyutu kontrolü (0 byte dosya koruması)
+        if ($file->getSize() < 100) { // 100 byte minimum
+            $errors[] = 'Dosya çok küçük, geçerli bir döküman değil.';
+        }
+
+        // Dosya adı güvenlik kontrolü
+        $originalName = $file->getClientOriginalName();
+        if ($this->hasUnsafeFileName($originalName)) {
+            $errors[] = 'Dosya adı güvenli olmayan karakterler içeriyor.';
+        }
+
+        // İçerik tabanlı güvenlik kontrolleri
+        $contentErrors = $this->validateFileContent($file, $dokumanTipi);
+        $errors = array_merge($errors, $contentErrors);
+
+        // Virüs tarama (opsiyonel - ClamAV gibi)
+        if (config('filesystems.virus_scan_enabled', false)) {
+            $virusErrors = $this->scanForVirus($file);
+            $errors = array_merge($errors, $virusErrors);
+        }
+
+        return $errors;
+    }
+
+    /**
+     * MIME type'a göre beklenen dosya uzantıları
+     */
+    private function getMimeTypeExtensions(string $mimeType): array
+    {
+        return match ($mimeType) {
+            'application/pdf' => ['pdf'],
+            'image/jpeg' => ['jpg', 'jpeg'],
+            'image/png' => ['png'],
+            'image/tiff' => ['tif', 'tiff'],
+            'application/dwg', 'application/acad' => ['dwg'],
+            'application/dxf' => ['dxf'],
+            'application/msword' => ['doc'],
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document' => ['docx'],
+            'application/vnd.ms-excel' => ['xls'],
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' => ['xlsx'],
+            default => []
+        };
+    }
+
+    /**
+     * Güvenli olmayan dosya adı kontrolü
+     */
+    private function hasUnsafeFileName(string $fileName): bool
+    {
+        // Tehlikeli karakterler ve pattern'ler
+        $unsafePatterns = [
+            '/\.\.|\/|\\\\/',  // Directory traversal
+            '/[<>:"|?*]/',     // Windows reserved characters
+            '/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i', // Windows reserved names
+            '/\.(php|js|html|htm|exe|bat|cmd|sh)$/i',    // Executable extensions
+            '/\x00/',          // Null bytes
+        ];
+
+        foreach ($unsafePatterns as $pattern) {
+            if (preg_match($pattern, $fileName)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Dosya içeriği güvenlik kontrolü
+     */
+    private function validateFileContent(UploadedFile $file, DokumanTipi $dokumanTipi): array
+    {
+        $errors = [];
+        $filePath = $file->getRealPath();
+
+        try {
+            // Dosya header kontrolü (magic bytes)
+            $fileHeader = file_get_contents($filePath, false, null, 0, 20);
+            
+            if (!$this->isValidFileHeader($fileHeader, $file->getMimeType())) {
+                $errors[] = 'Dosya içeriği MIME type ile uyumlu değil.';
+            }
+
+            // PDF özel kontrolleri
+            if ($file->getMimeType() === 'application/pdf') {
+                $pdfErrors = $this->validatePdfContent($filePath);
+                $errors = array_merge($errors, $pdfErrors);
+            }
+
+            // Resim dosyaları için kontroller
+            if (str_starts_with($file->getMimeType(), 'image/')) {
+                $imageErrors = $this->validateImageContent($filePath);
+                $errors = array_merge($errors, $imageErrors);
+            }
+
+            // Zararlı script kontrolü
+            $scriptErrors = $this->scanForMaliciousContent($filePath);
+            $errors = array_merge($errors, $scriptErrors);
+
+        } catch (\Exception $e) {
+            $errors[] = 'Dosya içeriği analiz edilemedi.';
+        }
+
+        return $errors;
+    }
+
+    /**
+     * Dosya header (magic bytes) kontrolü
+     */
+    private function isValidFileHeader(string $header, string $mimeType): bool
+    {
+        $magicBytes = [
+            'application/pdf' => ['%PDF'],
+            'image/jpeg' => ["\xFF\xD8\xFF"],
+            'image/png' => ["\x89PNG\r\n\x1A\n"],
+            'image/tiff' => ["II*\x00", "MM\x00*"],
+            'application/msword' => ["\xD0\xCF\x11\xE0"],
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document' => ["PK\x03\x04"],
+        ];
+
+        if (!isset($magicBytes[$mimeType])) {
+            return true; // Bilinmeyen tip için geç
+        }
+
+        foreach ($magicBytes[$mimeType] as $magic) {
+            if (str_starts_with($header, $magic)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * PDF içerik kontrolü
+     */
+    private function validatePdfContent(string $filePath): array
+    {
+        $errors = [];
+
+        try {
+            // PDF header kontrolü
+            $handle = fopen($filePath, 'rb');
+            $header = fread($handle, 8);
+            fclose($handle);
+
+            if (!str_starts_with($header, '%PDF-')) {
+                $errors[] = 'Geçerli bir PDF dosyası değil.';
+                return $errors;
+            }
+
+            // PDF versiyonu kontrolü
+            $version = substr($header, 5, 3);
+            if (!in_array($version, ['1.0', '1.1', '1.2', '1.3', '1.4', '1.5', '1.6', '1.7', '2.0'])) {
+                $errors[] = 'Desteklenmeyen PDF versiyonu.';
+            }
+
+            // Dosya boyutu vs içerik tutarlılığı
+            $fileSize = filesize($filePath);
+            if ($fileSize > 100 * 1024 * 1024) { // 100MB üzeri PDF'ler şüpheli
+                $errors[] = 'PDF dosyası çok büyük, güvenlik riski oluşturabilir.';
+            }
+
+        } catch (\Exception $e) {
+            $errors[] = 'PDF dosyası analiz edilemedi.';
+        }
+
+        return $errors;
+    }
+
+    /**
+     * Resim içerik kontrolü
+     */
+    private function validateImageContent(string $filePath): array
+    {
+        $errors = [];
+
+        try {
+            $imageInfo = getimagesize($filePath);
+            
+            if (!$imageInfo) {
+                $errors[] = 'Geçerli bir resim dosyası değil.';
+                return $errors;
+            }
+
+            // Aşırı büyük resim kontrolü
+            if ($imageInfo[0] > 10000 || $imageInfo[1] > 10000) {
+                $errors[] = 'Resim boyutları çok büyük (max 10000x10000).';
+            }
+
+            // Sıfır boyutlu resim kontrolü
+            if ($imageInfo[0] <= 0 || $imageInfo[1] <= 0) {
+                $errors[] = 'Geçersiz resim boyutları.';
+            }
+
+        } catch (\Exception $e) {
+            $errors[] = 'Resim dosyası analiz edilemedi.';
+        }
+
+        return $errors;
+    }
+
+    /**
+     * Zararlı içerik tarama
+     */
+    private function scanForMaliciousContent(string $filePath): array
+    {
+        $errors = [];
+
+        try {
+            // Dosya içeriğinin bir kısmını oku (ilk 1MB)
+            $content = file_get_contents($filePath, false, null, 0, 1024 * 1024);
+            
+            // Zararlı pattern'ler
+            $maliciousPatterns = [
+                '/<script[^>]*>.*?<\/script>/is',
+                '/javascript:/i',
+                '/vbscript:/i',
+                '/onload\s*=/i',
+                '/onerror\s*=/i',
+                '/eval\s*\(/i',
+                '/exec\s*\(/i',
+                '/system\s*\(/i',
+                '/shell_exec\s*\(/i',
+                '/passthru\s*\(/i',
+            ];
+
+            foreach ($maliciousPatterns as $pattern) {
+                if (preg_match($pattern, $content)) {
+                    $errors[] = 'Dosya zararlı içerik barındırıyor olabilir.';
+                    break;
+                }
+            }
+
+            // Şüpheli string'ler
+            $suspiciousStrings = [
+                'eval(',
+                'base64_decode(',
+                'shell_exec(',
+                'system(',
+                'exec(',
+                'passthru(',
+                'file_get_contents(',
+                'file_put_contents(',
+                'fopen(',
+                'fwrite(',
+            ];
+
+            $suspiciousCount = 0;
+            foreach ($suspiciousStrings as $string) {
+                if (stripos($content, $string) !== false) {
+                    $suspiciousCount++;
+                }
+            }
+
+            if ($suspiciousCount > 2) {
+                $errors[] = 'Dosya şüpheli kod yapıları içeriyor.';
+            }
+
+        } catch (\Exception $e) {
+            // Hata durumunda sessizce geç
+        }
+
+        return $errors;
+    }
+
+    /**
+     * Virüs tarama (ClamAV entegrasyonu)
+     */
+    private function scanForVirus(UploadedFile $file): array
+    {
+        $errors = [];
+
+        try {
+            // ClamAV socket bağlantısı
+            $socket = socket_create(AF_UNIX, SOCK_STREAM, 0);
+            
+            if (!$socket || !socket_connect($socket, '/var/run/clamav/clamd.ctl')) {
+                // ClamAV mevcut değilse sessizce geç
+                return $errors;
+            }
+
+            // Dosyayı tara
+            $command = "SCAN " . $file->getRealPath() . "\n";
+            socket_write($socket, $command, strlen($command));
+            
+            $response = socket_read($socket, 1024);
+            socket_close($socket);
+
+            if (strpos($response, 'FOUND') !== false) {
+                $errors[] = 'Dosyada virüs tespit edildi.';
+            }
+
+        } catch (\Exception $e) {
+            // Virüs tarama hatası durumunda sessizce geç
         }
 
         return $errors;

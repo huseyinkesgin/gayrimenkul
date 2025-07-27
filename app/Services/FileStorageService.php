@@ -3,526 +3,638 @@
 namespace App\Services;
 
 use Illuminate\Support\Facades\Storage;
-use Illuminate\Support\Facades\Config;
-use Illuminate\Http\UploadedFile;
-use Carbon\Carbon;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 
+/**
+ * Dosya Depolama Servisi
+ * 
+ * Bu servis gayrimenkul portföy sistemi için dosya depolama,
+ * yedekleme ve temizleme işlemlerini yönetir.
+ * 
+ * Özellikler:
+ * - Çoklu disk desteği
+ * - Otomatik yedekleme
+ * - Dosya sıkıştırma
+ * - Temizleme işlemleri
+ * - Depolama istatistikleri
+ */
 class FileStorageService
 {
-    private string $defaultDisk;
-    private array $diskConfig;
+    private array $diskler;
+    private string $varsayilanDisk;
+    private string $yedekDisk;
+    private bool $otomatikYedekleme;
+    private int $eskiDosyaGunSayisi;
 
     public function __construct()
     {
-        $this->defaultDisk = Config::get('filesystems.default', 'local');
-        $this->diskConfig = Config::get('filesystems.disks', []);
+        $this->diskler = ['public', 'local', 's3'];
+        $this->varsayilanDisk = 'public';
+        $this->yedekDisk = 'local';
+        $this->otomatikYedekleme = config('filesystems.auto_backup', false);
+        $this->eskiDosyaGunSayisi = config('filesystems.old_file_days', 30);
     }
 
     /**
-     * Dosya depolama stratejisi - dosya tipine göre disk seçimi
+     * Dosya kaydet
      */
-    public function getOptimalDisk(string $fileType, int $fileSize = 0): string
-    {
-        // Dosya tipine göre disk stratejisi
-        return match ($fileType) {
-            'image' => $this->getImageStorageDisk($fileSize),
-            'document' => $this->getDocumentStorageDisk($fileSize),
-            'backup' => $this->getBackupStorageDisk(),
-            'temp' => $this->getTempStorageDisk(),
-            default => $this->defaultDisk
-        };
-    }
-
-    /**
-     * Resim dosyaları için disk seçimi
-     */
-    private function getImageStorageDisk(int $fileSize): string
-    {
-        // Büyük resimler için cloud storage
-        if ($fileSize > 10 * 1024 * 1024) { // 10MB'dan büyük
-            return $this->getCloudDisk() ?? 'public';
-        }
-
-        // Küçük resimler için local storage
-        return 'public';
-    }
-
-    /**
-     * Döküman dosyaları için disk seçimi
-     */
-    private function getDocumentStorageDisk(int $fileSize): string
-    {
-        // Büyük dökümanlar için cloud storage
-        if ($fileSize > 50 * 1024 * 1024) { // 50MB'dan büyük
-            return $this->getCloudDisk() ?? 'local';
-        }
-
-        return 'local';
-    }
-
-    /**
-     * Backup dosyaları için disk seçimi
-     */
-    private function getBackupStorageDisk(): string
-    {
-        return $this->getCloudDisk() ?? 'local';
-    }
-
-    /**
-     * Geçici dosyalar için disk seçimi
-     */
-    private function getTempStorageDisk(): string
-    {
-        return 'local'; // Geçici dosyalar her zaman local
-    }
-
-    /**
-     * Mevcut cloud disk'i bul
-     */
-    private function getCloudDisk(): ?string
-    {
-        $cloudDisks = ['s3', 'gcs', 'azure', 'digitalocean'];
-        
-        foreach ($cloudDisks as $disk) {
-            if (isset($this->diskConfig[$disk])) {
-                return $disk;
-            }
-        }
-
-        return null;
-    }
-
-    /**
-     * Dosya yolu oluşturma stratejisi
-     */
-    public function generatePath(
-        string $fileType,
-        string $category,
-        string $entityType,
-        string $entityId,
-        ?Carbon $date = null
-    ): string {
-        $date = $date ?? now();
-        $year = $date->year;
-        $month = $date->format('m');
-        $day = $date->format('d');
-
-        return match ($fileType) {
-            'image' => "images/{$category}/{$entityType}/{$entityId}/{$year}/{$month}",
-            'document' => "documents/{$category}/{$entityType}/{$entityId}/{$year}/{$month}",
-            'backup' => "backups/{$year}/{$month}/{$day}",
-            'temp' => "temp/{$year}/{$month}/{$day}",
-            'export' => "exports/{$entityType}/{$year}/{$month}",
-            'import' => "imports/{$entityType}/{$year}/{$month}",
-            default => "files/{$fileType}/{$year}/{$month}"
-        };
-    }
-
-    /**
-     * Güvenli dosya adı oluştur
-     */
-    public function generateSecureFileName(
-        UploadedFile $file,
-        string $prefix = '',
-        bool $preserveOriginalName = false
-    ): string {
-        $extension = strtolower($file->getClientOriginalExtension());
-        $timestamp = now()->format('Y-m-d_H-i-s');
-        $random = substr(md5(uniqid()), 0, 8);
-
-        if ($preserveOriginalName) {
-            $originalName = pathinfo($file->getClientOriginalName(), PATHINFO_FILENAME);
-            $safeName = preg_replace('/[^a-zA-Z0-9-_]/', '_', $originalName);
-            $safeName = substr($safeName, 0, 50); // Maksimum 50 karakter
-            
-            return $prefix ? "{$prefix}_{$safeName}_{$timestamp}_{$random}.{$extension}" 
-                          : "{$safeName}_{$timestamp}_{$random}.{$extension}";
-        }
-
-        return $prefix ? "{$prefix}_{$timestamp}_{$random}.{$extension}" 
-                      : "{$timestamp}_{$random}.{$extension}";
-    }
-
-    /**
-     * Dosya boyutuna göre chunk upload gerekli mi?
-     */
-    public function requiresChunkedUpload(int $fileSize): bool
-    {
-        $chunkThreshold = Config::get('app.chunk_upload_threshold', 100 * 1024 * 1024); // 100MB
-        return $fileSize > $chunkThreshold;
-    }
-
-    /**
-     * Disk kapasitesi kontrolü
-     */
-    public function checkDiskSpace(string $disk, int $requiredSpace): array
-    {
+    public function dosyaKaydet(
+        string $icerik,
+        string $dosyaYolu,
+        string $disk = null,
+        bool $yedekle = true
+    ): array {
         try {
-            $diskPath = $this->getDiskPath($disk);
+            $disk = $disk ?? $this->varsayilanDisk;
             
-            if (!$diskPath) {
+            // Ana diske kaydet
+            $kaydedildi = Storage::disk($disk)->put($dosyaYolu, $icerik);
+            
+            if (!$kaydedildi) {
                 return [
-                    'available' => true,
-                    'message' => 'Cloud storage - kapasite kontrolü yapılamıyor'
+                    'basarili' => false,
+                    'hata' => 'Dosya kaydedilemedi'
                 ];
             }
 
-            $freeSpace = disk_free_space($diskPath);
-            $totalSpace = disk_total_space($diskPath);
+            $sonuc = [
+                'basarili' => true,
+                'dosya_yolu' => $dosyaYolu,
+                'disk' => $disk,
+                'boyut' => strlen($icerik),
+                'url' => Storage::disk($disk)->url($dosyaYolu)
+            ];
 
-            $available = $freeSpace > $requiredSpace;
-            $usagePercent = (($totalSpace - $freeSpace) / $totalSpace) * 100;
+            // Otomatik yedekleme
+            if ($yedekle && $this->otomatikYedekleme) {
+                $yedekSonuc = $this->dosyaYedekle($dosyaYolu, $disk);
+                $sonuc['yedek'] = $yedekSonuc;
+            }
+
+            return $sonuc;
+
+        } catch (\Exception $e) {
+            Log::error('Dosya kaydetme hatası: ' . $e->getMessage(), [
+                'dosya_yolu' => $dosyaYolu,
+                'disk' => $disk
+            ]);
 
             return [
-                'available' => $available,
-                'free_space' => $freeSpace,
-                'total_space' => $totalSpace,
-                'usage_percent' => round($usagePercent, 2),
-                'required_space' => $requiredSpace,
-                'message' => $available ? 'Yeterli alan var' : 'Yetersiz disk alanı'
+                'basarili' => false,
+                'hata' => $e->getMessage()
+            ];
+        }
+    }
+
+    /**
+     * Dosya oku
+     */
+    public function dosyaOku(string $dosyaYolu, string $disk = null): array
+    {
+        try {
+            $disk = $disk ?? $this->varsayilanDisk;
+            
+            if (!Storage::disk($disk)->exists($dosyaYolu)) {
+                return [
+                    'basarili' => false,
+                    'hata' => 'Dosya bulunamadı'
+                ];
+            }
+
+            $icerik = Storage::disk($disk)->get($dosyaYolu);
+            $boyut = Storage::disk($disk)->size($dosyaYolu);
+            $sonDegisiklik = Storage::disk($disk)->lastModified($dosyaYolu);
+
+            return [
+                'basarili' => true,
+                'icerik' => $icerik,
+                'boyut' => $boyut,
+                'son_degisiklik' => date('Y-m-d H:i:s', $sonDegisiklik),
+                'mime_type' => Storage::disk($disk)->mimeType($dosyaYolu)
             ];
 
         } catch (\Exception $e) {
+            Log::error('Dosya okuma hatası: ' . $e->getMessage(), [
+                'dosya_yolu' => $dosyaYolu,
+                'disk' => $disk
+            ]);
+
             return [
-                'available' => false,
-                'message' => 'Disk alanı kontrolü yapılamadı: ' . $e->getMessage()
+                'basarili' => false,
+                'hata' => $e->getMessage()
             ];
         }
     }
 
     /**
-     * Disk fiziksel yolunu al
+     * Dosya sil
      */
-    private function getDiskPath(string $disk): ?string
+    public function dosyaSil(string $dosyaYolu, string $disk = null, bool $yedektenDeSil = false): array
     {
-        $diskConfig = $this->diskConfig[$disk] ?? null;
-        
-        if (!$diskConfig || $diskConfig['driver'] !== 'local') {
-            return null;
-        }
+        try {
+            $disk = $disk ?? $this->varsayilanDisk;
+            
+            if (!Storage::disk($disk)->exists($dosyaYolu)) {
+                return [
+                    'basarili' => false,
+                    'hata' => 'Dosya bulunamadı'
+                ];
+            }
 
-        return $diskConfig['root'] ?? null;
+            // Ana diskten sil
+            $silindi = Storage::disk($disk)->delete($dosyaYolu);
+            
+            $sonuc = [
+                'basarili' => $silindi,
+                'dosya_yolu' => $dosyaYolu,
+                'disk' => $disk
+            ];
+
+            // Yedekten de sil
+            if ($yedektenDeSil && Storage::disk($this->yedekDisk)->exists($dosyaYolu)) {
+                $yedekSilindi = Storage::disk($this->yedekDisk)->delete($dosyaYolu);
+                $sonuc['yedek_silindi'] = $yedekSilindi;
+            }
+
+            return $sonuc;
+
+        } catch (\Exception $e) {
+            Log::error('Dosya silme hatası: ' . $e->getMessage(), [
+                'dosya_yolu' => $dosyaYolu,
+                'disk' => $disk
+            ]);
+
+            return [
+                'basarili' => false,
+                'hata' => $e->getMessage()
+            ];
+        }
     }
 
     /**
-     * Dosya temizleme - eski dosyaları sil
+     * Dosya yedekle
      */
-    public function cleanupOldFiles(string $disk, string $path, int $daysOld = 30): array
+    public function dosyaYedekle(string $dosyaYolu, string $kaynakDisk = null): array
     {
         try {
-            $cutoffDate = now()->subDays($daysOld);
-            $deletedFiles = [];
-            $totalSize = 0;
+            $kaynakDisk = $kaynakDisk ?? $this->varsayilanDisk;
+            
+            if (!Storage::disk($kaynakDisk)->exists($dosyaYolu)) {
+                return [
+                    'basarili' => false,
+                    'hata' => 'Kaynak dosya bulunamadı'
+                ];
+            }
 
-            $files = Storage::disk($disk)->allFiles($path);
+            // Yedek klasörü oluştur
+            $yedekYolu = 'yedekler/' . date('Y/m/d') . '/' . $dosyaYolu;
+            $icerik = Storage::disk($kaynakDisk)->get($dosyaYolu);
+            
+            $yedeklendi = Storage::disk($this->yedekDisk)->put($yedekYolu, $icerik);
 
-            foreach ($files as $file) {
-                $lastModified = Storage::disk($disk)->lastModified($file);
+            return [
+                'basarili' => $yedeklendi,
+                'kaynak_yol' => $dosyaYolu,
+                'yedek_yol' => $yedekYolu,
+                'kaynak_disk' => $kaynakDisk,
+                'yedek_disk' => $this->yedekDisk
+            ];
+
+        } catch (\Exception $e) {
+            Log::error('Dosya yedekleme hatası: ' . $e->getMessage(), [
+                'dosya_yolu' => $dosyaYolu,
+                'kaynak_disk' => $kaynakDisk
+            ]);
+
+            return [
+                'basarili' => false,
+                'hata' => $e->getMessage()
+            ];
+        }
+    }
+
+    /**
+     * Dosya kopyala
+     */
+    public function dosyaKopyala(
+        string $kaynakYol,
+        string $hedefYol,
+        string $kaynakDisk = null,
+        string $hedefDisk = null
+    ): array {
+        try {
+            $kaynakDisk = $kaynakDisk ?? $this->varsayilanDisk;
+            $hedefDisk = $hedefDisk ?? $this->varsayilanDisk;
+            
+            if (!Storage::disk($kaynakDisk)->exists($kaynakYol)) {
+                return [
+                    'basarili' => false,
+                    'hata' => 'Kaynak dosya bulunamadı'
+                ];
+            }
+
+            $icerik = Storage::disk($kaynakDisk)->get($kaynakYol);
+            $kopyalandi = Storage::disk($hedefDisk)->put($hedefYol, $icerik);
+
+            return [
+                'basarili' => $kopyalandi,
+                'kaynak_yol' => $kaynakYol,
+                'hedef_yol' => $hedefYol,
+                'kaynak_disk' => $kaynakDisk,
+                'hedef_disk' => $hedefDisk
+            ];
+
+        } catch (\Exception $e) {
+            Log::error('Dosya kopyalama hatası: ' . $e->getMessage(), [
+                'kaynak_yol' => $kaynakYol,
+                'hedef_yol' => $hedefYol
+            ]);
+
+            return [
+                'basarili' => false,
+                'hata' => $e->getMessage()
+            ];
+        }
+    }
+
+    /**
+     * Dosya taşı
+     */
+    public function dosyaTasi(
+        string $kaynakYol,
+        string $hedefYol,
+        string $kaynakDisk = null,
+        string $hedefDisk = null
+    ): array {
+        try {
+            // Önce kopyala
+            $kopyaSonuc = $this->dosyaKopyala($kaynakYol, $hedefYol, $kaynakDisk, $hedefDisk);
+            
+            if (!$kopyaSonuc['basarili']) {
+                return $kopyaSonuc;
+            }
+
+            // Sonra kaynağı sil
+            $silmeSonuc = $this->dosyaSil($kaynakYol, $kaynakDisk);
+            
+            return [
+                'basarili' => $silmeSonuc['basarili'],
+                'kaynak_yol' => $kaynakYol,
+                'hedef_yol' => $hedefYol,
+                'kaynak_disk' => $kaynakDisk ?? $this->varsayilanDisk,
+                'hedef_disk' => $hedefDisk ?? $this->varsayilanDisk
+            ];
+
+        } catch (\Exception $e) {
+            Log::error('Dosya taşıma hatası: ' . $e->getMessage());
+
+            return [
+                'basarili' => false,
+                'hata' => $e->getMessage()
+            ];
+        }
+    }
+
+    /**
+     * Klasör oluştur
+     */
+    public function klasorOlustur(string $klasorYolu, string $disk = null): array
+    {
+        try {
+            $disk = $disk ?? $this->varsayilanDisk;
+            
+            $olusturuldu = Storage::disk($disk)->makeDirectory($klasorYolu);
+
+            return [
+                'basarili' => $olusturuldu,
+                'klasor_yolu' => $klasorYolu,
+                'disk' => $disk
+            ];
+
+        } catch (\Exception $e) {
+            Log::error('Klasör oluşturma hatası: ' . $e->getMessage(), [
+                'klasor_yolu' => $klasorYolu,
+                'disk' => $disk
+            ]);
+
+            return [
+                'basarili' => false,
+                'hata' => $e->getMessage()
+            ];
+        }
+    }
+
+    /**
+     * Klasör sil
+     */
+    public function klasorSil(string $klasorYolu, string $disk = null): array
+    {
+        try {
+            $disk = $disk ?? $this->varsayilanDisk;
+            
+            if (!Storage::disk($disk)->exists($klasorYolu)) {
+                return [
+                    'basarili' => false,
+                    'hata' => 'Klasör bulunamadı'
+                ];
+            }
+
+            $silindi = Storage::disk($disk)->deleteDirectory($klasorYolu);
+
+            return [
+                'basarili' => $silindi,
+                'klasor_yolu' => $klasorYolu,
+                'disk' => $disk
+            ];
+
+        } catch (\Exception $e) {
+            Log::error('Klasör silme hatası: ' . $e->getMessage(), [
+                'klasor_yolu' => $klasorYolu,
+                'disk' => $disk
+            ]);
+
+            return [
+                'basarili' => false,
+                'hata' => $e->getMessage()
+            ];
+        }
+    }
+
+    /**
+     * Klasör içeriğini listele
+     */
+    public function klasorIcerigiListele(string $klasorYolu = '', string $disk = null): array
+    {
+        try {
+            $disk = $disk ?? $this->varsayilanDisk;
+            
+            $dosyalar = Storage::disk($disk)->files($klasorYolu);
+            $klasorler = Storage::disk($disk)->directories($klasorYolu);
+
+            $dosyaBilgileri = [];
+            foreach ($dosyalar as $dosya) {
+                $dosyaBilgileri[] = [
+                    'ad' => basename($dosya),
+                    'yol' => $dosya,
+                    'boyut' => Storage::disk($disk)->size($dosya),
+                    'son_degisiklik' => Storage::disk($disk)->lastModified($dosya),
+                    'mime_type' => Storage::disk($disk)->mimeType($dosya),
+                    'url' => Storage::disk($disk)->url($dosya)
+                ];
+            }
+
+            return [
+                'basarili' => true,
+                'klasor_yolu' => $klasorYolu,
+                'dosyalar' => $dosyaBilgileri,
+                'klasorler' => $klasorler,
+                'toplam_dosya' => count($dosyalar),
+                'toplam_klasor' => count($klasorler)
+            ];
+
+        } catch (\Exception $e) {
+            Log::error('Klasör listeleme hatası: ' . $e->getMessage(), [
+                'klasor_yolu' => $klasorYolu,
+                'disk' => $disk
+            ]);
+
+            return [
+                'basarili' => false,
+                'hata' => $e->getMessage()
+            ];
+        }
+    }
+
+    /**
+     * Depolama istatistikleri
+     */
+    public function depolamaIstatistikleri(string $disk = null): array
+    {
+        try {
+            $disk = $disk ?? $this->varsayilanDisk;
+            
+            $tumDosyalar = Storage::disk($disk)->allFiles();
+            $toplamBoyut = 0;
+            $dosyaTipleri = [];
+
+            foreach ($tumDosyalar as $dosya) {
+                $boyut = Storage::disk($disk)->size($dosya);
+                $toplamBoyut += $boyut;
                 
-                if ($lastModified < $cutoffDate->timestamp) {
-                    $size = Storage::disk($disk)->size($file);
+                $uzanti = pathinfo($dosya, PATHINFO_EXTENSION);
+                if (!isset($dosyaTipleri[$uzanti])) {
+                    $dosyaTipleri[$uzanti] = ['adet' => 0, 'boyut' => 0];
+                }
+                $dosyaTipleri[$uzanti]['adet']++;
+                $dosyaTipleri[$uzanti]['boyut'] += $boyut;
+            }
+
+            return [
+                'basarili' => true,
+                'disk' => $disk,
+                'toplam_dosya' => count($tumDosyalar),
+                'toplam_boyut' => $toplamBoyut,
+                'toplam_boyut_formatli' => $this->boyutFormatla($toplamBoyut),
+                'dosya_tipleri' => $dosyaTipleri,
+                'ortalama_dosya_boyutu' => count($tumDosyalar) > 0 ? $toplamBoyut / count($tumDosyalar) : 0
+            ];
+
+        } catch (\Exception $e) {
+            Log::error('Depolama istatistikleri hatası: ' . $e->getMessage(), [
+                'disk' => $disk
+            ]);
+
+            return [
+                'basarili' => false,
+                'hata' => $e->getMessage()
+            ];
+        }
+    }
+
+    /**
+     * Eski dosyaları temizle
+     */
+    public function eskiDosyalariTemizle(string $disk = null, int $gunSayisi = null): array
+    {
+        try {
+            $disk = $disk ?? $this->varsayilanDisk;
+            $gunSayisi = $gunSayisi ?? $this->eskiDosyaGunSayisi;
+            
+            $silinecekTarih = time() - ($gunSayisi * 24 * 60 * 60);
+            $tumDosyalar = Storage::disk($disk)->allFiles();
+            
+            $silinenDosyalar = [];
+            $silinenBoyut = 0;
+
+            foreach ($tumDosyalar as $dosya) {
+                $sonDegisiklik = Storage::disk($disk)->lastModified($dosya);
+                
+                if ($sonDegisiklik < $silinecekTarih) {
+                    $boyut = Storage::disk($disk)->size($dosya);
                     
-                    if (Storage::disk($disk)->delete($file)) {
-                        $deletedFiles[] = $file;
-                        $totalSize += $size;
+                    if (Storage::disk($disk)->delete($dosya)) {
+                        $silinenDosyalar[] = $dosya;
+                        $silinenBoyut += $boyut;
                     }
                 }
             }
 
+            Log::info('Eski dosya temizleme tamamlandı', [
+                'disk' => $disk,
+                'gun_sayisi' => $gunSayisi,
+                'silinen_adet' => count($silinenDosyalar),
+                'silinen_boyut' => $silinenBoyut
+            ]);
+
             return [
-                'success' => true,
-                'deleted_count' => count($deletedFiles),
-                'total_size_freed' => $totalSize,
-                'formatted_size' => $this->formatBytes($totalSize),
-                'files' => $deletedFiles
+                'basarili' => true,
+                'disk' => $disk,
+                'gun_sayisi' => $gunSayisi,
+                'silinen_dosyalar' => $silinenDosyalar,
+                'silinen_adet' => count($silinenDosyalar),
+                'silinen_boyut' => $silinenBoyut,
+                'silinen_boyut_formatli' => $this->boyutFormatla($silinenBoyut)
             ];
 
         } catch (\Exception $e) {
+            Log::error('Eski dosya temizleme hatası: ' . $e->getMessage(), [
+                'disk' => $disk,
+                'gun_sayisi' => $gunSayisi
+            ]);
+
             return [
-                'success' => false,
-                'message' => 'Dosya temizleme hatası: ' . $e->getMessage()
+                'basarili' => false,
+                'hata' => $e->getMessage()
             ];
         }
     }
 
     /**
-     * Dosya sıkıştırma
+     * Dosya sıkıştır
      */
-    public function compressFile(string $disk, string $filePath): array
+    public function dosyaSikistir(array $dosyaYollari, string $zipAdi, string $disk = null): array
     {
         try {
-            if (!Storage::disk($disk)->exists($filePath)) {
+            $disk = $disk ?? $this->varsayilanDisk;
+            
+            $zip = new \ZipArchive();
+            $zipYolu = storage_path('app/temp/' . $zipAdi);
+            
+            // Temp klasörü oluştur
+            if (!is_dir(dirname($zipYolu))) {
+                mkdir(dirname($zipYolu), 0755, true);
+            }
+
+            if ($zip->open($zipYolu, \ZipArchive::CREATE) !== TRUE) {
                 return [
-                    'success' => false,
-                    'message' => 'Dosya bulunamadı'
+                    'basarili' => false,
+                    'hata' => 'ZIP dosyası oluşturulamadı'
                 ];
             }
 
-            $originalSize = Storage::disk($disk)->size($filePath);
-            $fileContent = Storage::disk($disk)->get($filePath);
+            $eklenenDosyalar = [];
+            foreach ($dosyaYollari as $dosyaYolu) {
+                if (Storage::disk($disk)->exists($dosyaYolu)) {
+                    $icerik = Storage::disk($disk)->get($dosyaYolu);
+                    $zip->addFromString(basename($dosyaYolu), $icerik);
+                    $eklenenDosyalar[] = $dosyaYolu;
+                }
+            }
+
+            $zip->close();
+
+            // ZIP dosyasını storage'a taşı
+            $hedefYol = 'arsivler/' . date('Y/m/d') . '/' . $zipAdi;
+            $zipIcerik = file_get_contents($zipYolu);
+            Storage::disk($disk)->put($hedefYol, $zipIcerik);
             
-            // Gzip sıkıştırma
-            $compressedContent = gzencode($fileContent, 9);
-            $compressedPath = $filePath . '.gz';
-            
-            Storage::disk($disk)->put($compressedPath, $compressedContent);
-            $compressedSize = Storage::disk($disk)->size($compressedPath);
+            // Temp dosyayı sil
+            unlink($zipYolu);
 
             return [
-                'success' => true,
-                'original_path' => $filePath,
-                'compressed_path' => $compressedPath,
-                'original_size' => $originalSize,
-                'compressed_size' => $compressedSize,
-                'compression_ratio' => round((1 - ($compressedSize / $originalSize)) * 100, 2),
-                'savings' => $originalSize - $compressedSize
+                'basarili' => true,
+                'zip_yolu' => $hedefYol,
+                'zip_boyutu' => strlen($zipIcerik),
+                'eklenen_dosyalar' => $eklenenDosyalar,
+                'eklenen_adet' => count($eklenenDosyalar),
+                'url' => Storage::disk($disk)->url($hedefYol)
             ];
 
         } catch (\Exception $e) {
+            Log::error('Dosya sıkıştırma hatası: ' . $e->getMessage());
+
             return [
-                'success' => false,
-                'message' => 'Sıkıştırma hatası: ' . $e->getMessage()
+                'basarili' => false,
+                'hata' => $e->getMessage()
             ];
         }
     }
 
     /**
-     * Dosya sıkıştırmasını aç
+     * Boyut formatla
      */
-    public function decompressFile(string $disk, string $compressedPath): array
+    private function boyutFormatla(int $bytes): string
     {
-        try {
-            if (!Storage::disk($disk)->exists($compressedPath)) {
-                return [
-                    'success' => false,
-                    'message' => 'Sıkıştırılmış dosya bulunamadı'
-                ];
-            }
-
-            $compressedContent = Storage::disk($disk)->get($compressedPath);
-            $decompressedContent = gzdecode($compressedContent);
-            
-            if ($decompressedContent === false) {
-                return [
-                    'success' => false,
-                    'message' => 'Dosya açılamadı'
-                ];
-            }
-
-            $originalPath = str_replace('.gz', '', $compressedPath);
-            Storage::disk($disk)->put($originalPath, $decompressedContent);
-
-            return [
-                'success' => true,
-                'compressed_path' => $compressedPath,
-                'decompressed_path' => $originalPath,
-                'decompressed_size' => strlen($decompressedContent)
-            ];
-
-        } catch (\Exception $e) {
-            return [
-                'success' => false,
-                'message' => 'Açma hatası: ' . $e->getMessage()
-            ];
-        }
-    }
-
-    /**
-     * Dosya yedekleme
-     */
-    public function backupFile(string $sourceDisk, string $sourcePath, string $backupDisk = null): array
-    {
-        try {
-            $backupDisk = $backupDisk ?? $this->getBackupStorageDisk();
-            
-            if (!Storage::disk($sourceDisk)->exists($sourcePath)) {
-                return [
-                    'success' => false,
-                    'message' => 'Kaynak dosya bulunamadı'
-                ];
-            }
-
-            $backupPath = 'backups/' . now()->format('Y/m/d') . '/' . basename($sourcePath);
-            $fileContent = Storage::disk($sourceDisk)->get($sourcePath);
-            
-            Storage::disk($backupDisk)->put($backupPath, $fileContent);
-
-            return [
-                'success' => true,
-                'source_path' => $sourcePath,
-                'backup_path' => $backupPath,
-                'backup_disk' => $backupDisk,
-                'file_size' => strlen($fileContent)
-            ];
-
-        } catch (\Exception $e) {
-            return [
-                'success' => false,
-                'message' => 'Yedekleme hatası: ' . $e->getMessage()
-            ];
-        }
-    }
-
-    /**
-     * Disk kullanım raporu
-     */
-    public function getDiskUsageReport(): array
-    {
-        $report = [];
-
-        foreach ($this->diskConfig as $diskName => $config) {
-            try {
-                $usage = $this->getDiskUsage($diskName);
-                $report[$diskName] = $usage;
-            } catch (\Exception $e) {
-                $report[$diskName] = [
-                    'error' => $e->getMessage()
-                ];
-            }
-        }
-
-        return $report;
-    }
-
-    /**
-     * Belirli bir disk için kullanım bilgisi
-     */
-    private function getDiskUsage(string $disk): array
-    {
-        $diskPath = $this->getDiskPath($disk);
+        $units = ['B', 'KB', 'MB', 'GB', 'TB'];
+        $bytes = max($bytes, 0);
+        $pow = floor(($bytes ? log($bytes) : 0) / log(1024));
+        $pow = min($pow, count($units) - 1);
         
-        if (!$diskPath) {
-            return [
-                'type' => 'cloud',
-                'message' => 'Cloud storage - detaylı bilgi alınamıyor'
-            ];
-        }
-
-        $freeSpace = disk_free_space($diskPath);
-        $totalSpace = disk_total_space($diskPath);
-        $usedSpace = $totalSpace - $freeSpace;
-        $usagePercent = ($usedSpace / $totalSpace) * 100;
-
-        return [
-            'type' => 'local',
-            'total_space' => $totalSpace,
-            'used_space' => $usedSpace,
-            'free_space' => $freeSpace,
-            'usage_percent' => round($usagePercent, 2),
-            'formatted' => [
-                'total' => $this->formatBytes($totalSpace),
-                'used' => $this->formatBytes($usedSpace),
-                'free' => $this->formatBytes($freeSpace)
-            ]
-        ];
-    }
-
-    /**
-     * Dosya güvenlik kontrolü
-     */
-    public function validateFileSecurity(UploadedFile $file): array
-    {
-        $errors = [];
-        $warnings = [];
-
-        // Dosya uzantısı kontrolü
-        $extension = strtolower($file->getClientOriginalExtension());
-        $dangerousExtensions = ['php', 'exe', 'bat', 'cmd', 'scr', 'pif', 'vbs', 'js'];
+        $bytes /= pow(1024, $pow);
         
-        if (in_array($extension, $dangerousExtensions)) {
-            $errors[] = 'Güvenlik riski: Tehlikeli dosya uzantısı';
-        }
-
-        // MIME type kontrolü
-        $mimeType = $file->getMimeType();
-        $allowedMimeTypes = [
-            'image/jpeg', 'image/png', 'image/gif', 'image/webp',
-            'application/pdf', 'application/msword', 
-            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-            'application/vnd.ms-excel',
-            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        ];
-
-        if (!in_array($mimeType, $allowedMimeTypes)) {
-            $warnings[] = 'Uyarı: Beklenmeyen MIME type - ' . $mimeType;
-        }
-
-        // Dosya boyutu kontrolü
-        $maxSize = Config::get('app.max_file_size', 100 * 1024 * 1024); // 100MB
-        if ($file->getSize() > $maxSize) {
-            $errors[] = 'Dosya boyutu çok büyük';
-        }
-
-        // Dosya adı kontrolü
-        $fileName = $file->getClientOriginalName();
-        if (preg_match('/[<>:"|?*]/', $fileName)) {
-            $warnings[] = 'Dosya adında geçersiz karakterler var';
-        }
-
-        return [
-            'safe' => empty($errors),
-            'errors' => $errors,
-            'warnings' => $warnings
-        ];
+        return round($bytes, 2) . ' ' . $units[$pow];
     }
 
     /**
-     * Byte formatı
+     * Benzersiz dosya adı oluştur
      */
-    private function formatBytes(int $bytes): string
+    public function benzersizDosyaAdiOlustur(string $orijinalAd, string $klasorYolu = '', string $disk = null): string
     {
-        if ($bytes >= 1073741824) {
-            return number_format($bytes / 1073741824, 2) . ' GB';
-        } elseif ($bytes >= 1048576) {
-            return number_format($bytes / 1048576, 2) . ' MB';
-        } elseif ($bytes >= 1024) {
-            return number_format($bytes / 1024, 2) . ' KB';
-        } else {
-            return $bytes . ' bytes';
+        $disk = $disk ?? $this->varsayilanDisk;
+        $dosyaAdi = pathinfo($orijinalAd, PATHINFO_FILENAME);
+        $uzanti = pathinfo($orijinalAd, PATHINFO_EXTENSION);
+        
+        $sayac = 1;
+        $yeniAd = $orijinalAd;
+        
+        while (Storage::disk($disk)->exists($klasorYolu . '/' . $yeniAd)) {
+            $yeniAd = $dosyaAdi . '_' . $sayac . '.' . $uzanti;
+            $sayac++;
         }
+        
+        return $yeniAd;
     }
 
     /**
-     * Dosya URL'si oluştur
+     * Disk durumunu kontrol et
      */
-    public function getFileUrl(string $disk, string $path): string
-    {
-        if ($disk === 'public') {
-            return Storage::disk('public')->url($path);
-        }
-
-        // Cloud storage için signed URL
-        if (in_array($disk, ['s3', 'gcs', 'azure'])) {
-            return Storage::disk($disk)->temporaryUrl($path, now()->addHours(1));
-        }
-
-        // Local disk için route üzerinden
-        return route('file.serve', ['disk' => $disk, 'path' => base64_encode($path)]);
-    }
-
-    /**
-     * Dosya metadata'sı
-     */
-    public function getFileMetadata(string $disk, string $path): array
+    public function diskDurumuKontrol(string $disk = null): array
     {
         try {
-            if (!Storage::disk($disk)->exists($path)) {
-                return ['exists' => false];
+            $disk = $disk ?? $this->varsayilanDisk;
+            
+            // Disk erişilebilir mi?
+            $erisimTesti = Storage::disk($disk)->put('test_file.txt', 'test');
+            if ($erisimTesti) {
+                Storage::disk($disk)->delete('test_file.txt');
             }
 
             return [
-                'exists' => true,
-                'size' => Storage::disk($disk)->size($path),
-                'last_modified' => Storage::disk($disk)->lastModified($path),
-                'mime_type' => Storage::disk($disk)->mimeType($path),
-                'formatted_size' => $this->formatBytes(Storage::disk($disk)->size($path)),
-                'formatted_date' => Carbon::createFromTimestamp(Storage::disk($disk)->lastModified($path))->format('d.m.Y H:i:s')
+                'basarili' => true,
+                'disk' => $disk,
+                'erisim' => $erisimTesti,
+                'durum' => 'Çalışıyor',
+                'test_tarihi' => now()->toISOString()
             ];
 
         } catch (\Exception $e) {
             return [
-                'exists' => false,
-                'error' => $e->getMessage()
+                'basarili' => false,
+                'disk' => $disk,
+                'erisim' => false,
+                'durum' => 'Hata: ' . $e->getMessage(),
+                'test_tarihi' => now()->toISOString()
             ];
         }
     }

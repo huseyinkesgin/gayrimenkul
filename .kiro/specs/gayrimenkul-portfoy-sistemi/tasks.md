@@ -2,43 +2,43 @@
 
 ## 0. Temel Altyapı Modülleri (Mevcut Sistemden)
 
-- [x] 0.1 Kullanıcı yönetimi altyapısını oluştur
+- [ ] 0.1 Kullanıcı yönetimi altyapısını oluştur
   - User modeli ve authentication sistemi oluştur
   - Avatar resim ilişkisi kur
   - Kullanıcı profil yönetimi ekle
   - _Gereksinimler: 15.1, 15.2, 15.3, 15.4, 15.5_
 
-- [x] 0.2 Lokasyon hiyerarşisi modellerini oluştur
+- [ ] 0.2 Lokasyon hiyerarşisi modellerini oluştur
   - Sehir, Ilce, Semt, Mahalle modellerini oluştur
   - Hiyerarşik ilişkileri kur
   - Lokasyon arama ve filtreleme scope'ları ekle
   - _Gereksinimler: 16.1, 16.2, 16.3, 16.4, 16.5_
 
-- [x] 0.3 Kişi yönetimi modelini oluştur
+- [ ] 0.3 Kişi yönetimi modelini oluştur
   - Kisi modelini oluştur
   - TC kimlik, doğum tarihi, cinsiyet alanları ekle
   - Kişi arama ve filtreleme sistemi oluştur
   - _Gereksinimler: 17.1, 17.2, 17.3, 17.4, 17.5_
 
-- [x] 0.4 Organizasyon yapısı modellerini oluştur
+- [ ] 0.4 Organizasyon yapısı modellerini oluştur
   - Sube, Departman, Pozisyon, PersonelRol modellerini oluştur
   - Organizasyon hiyerarşisi ilişkilerini kur
   - Personel atama ve rol yönetimi sistemi oluştur
   - _Gereksinimler: 18.1, 18.2, 18.3, 18.4, 18.5_
 
-- [x] 0.5 Personel yönetimi sistemini oluştur
+- [ ] 0.5 Personel yönetimi sistemini oluştur
   - Personel modelini oluştur
   - Kişi, organizasyon ilişkilerini kur
   - Personel durumu ve rol takip sistemi ekle
   - _Gereksinimler: 19.1, 19.2, 19.3, 19.4, 19.5_
 
-- [x] 0.6 Gelişmiş resim yönetimi sistemini oluştur
+- [ ] 0.6 Gelişmiş resim yönetimi sistemini oluştur
   - Resim modelini genişlet
   - Kategori bazlı resim yönetimi ekle
   - Resim işleme ve metadata sistemi oluştur
   - _Gereksinimler: 20.1, 20.2, 20.3, 20.4, 20.5_
 
-- [x] 0.7 Adres yönetimi sistemini oluştur
+- [ ] 0.7 Adres yönetimi sistemini oluştur
   - Adres modelini oluştur (polymorphic)
   - Lokasyon hiyerarşisi ile entegrasyon
   - Varsayılan adres ve adres türü yönetimi
@@ -124,25 +124,25 @@
   - Resim metadata yönetimi ekle (boyut, tarih, vs.)
   - _Gereksinimler: 4.1, 4.2, 4.3, 4.4, 4.5, 6.1, 6.2, 6.3, 6.4, 6.5, 7.1, 7.2, 7.3, 7.4, 7.5_
 
-- [ ] 4.2 Döküman yönetim sistemini oluştur
+- [x] 4.2 Döküman yönetim sistemini oluştur
   - Dokuman modelini oluştur
   - Döküman tiplerine göre upload kuralları oluştur
   - Döküman versiyonlama sistemi ekle
   - _Gereksinimler: 5.1, 5.2, 5.3, 5.4, 5.5_
 
-- [ ] 4.3 Dosya upload ve işleme servislerini oluştur
+- [x] 4.3 Dosya upload ve işleme servislerini oluştur
   - ResimUploadService oluştur (boyutlandırma, optimizasyon)
   - DokumanUploadService oluştur (güvenlik kontrolleri)
   - Dosya depolama stratejisi uygula
   - _Gereksinimler: 4.1, 4.2, 5.1, 5.2, 6.1, 6.2, 7.1, 7.2_
 
-- [ ] 4.4 Galeri yönetim sistemi oluştur
+- [x] 4.4 Galeri yönetim sistemi oluştur
   - Mülk tipine göre galeri kuralları uygula
   - Galeri sıralama ve organizasyon sistemi oluştur
   - Galeri görüntüleme bileşenleri oluştur
   - _Gereksinimler: 4.1, 4.2, 4.3, 4.4, 4.5_
 
-- [ ] 4.5 Resim ve döküman testlerini yaz
+- [x] 4.5 Resim ve döküman testlerini yaz
   - Upload işlemleri için testler yaz
   - Kategori bazlı filtreleme testleri yaz
   - Dosya güvenlik testleri yaz
@@ -150,25 +150,25 @@
 
 ## 5. Talep Yönetimi ve Eşleştirme Sistemi
 
-- [ ] 5.1 Müşteri talep modelini oluştur
+- [x] 5.1 Müşteri talep modelini oluştur
   - MusteriTalep modelini oluştur
   - Talep kriterleri için JSON field yapısı oluştur
   - Talep durumu takip sistemi ekle
   - _Gereksinimler: 10.1, 10.2, 10.3, 10.4, 10.5_
 
-- [ ] 5.2 Talep-portföy eşleştirme algoritmasını oluştur
+- [x] 5.2 Talep-portföy eşleştirme algoritmasını oluştur
   - TalepEslestirmeService oluştur
   - Eşleştirme skoru hesaplama algoritması yaz
   - Otomatik eşleştirme kontrol sistemi oluştur
   - _Gereksinimler: 10.1, 10.2, 10.3, 10.4, 10.5_
 
-- [ ] 5.3 Eşleştirme takip sistemini oluştur
+- [x] 5.3 Eşleştirme takip sistemini oluştur
   - TalepPortfoyEslestirme modelini oluştur
   - Eşleştirme durumu takip sistemi oluştur
   - Eşleştirme bildirimleri sistemi ekle
   - _Gereksinimler: 10.3, 10.4, 10.5_
 
-- [ ] 5.4 Talep yönetimi testlerini yaz
+- [x] 5.4 Talep yönetimi testlerini yaz
   - Talep oluşturma testleri yaz
   - Eşleştirme algoritması testleri yaz
   - Bildirim sistemi testleri yaz

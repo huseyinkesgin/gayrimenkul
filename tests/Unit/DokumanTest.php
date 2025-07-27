@@ -40,7 +40,7 @@ class DokumanTest extends TestCase
 
     public function test_dokuman_can_have_versions()
     {
-        $originalDokuman = Dokuman::factory()->create();
+        $originalDokuman = Dokuman::factory()->create(['versiyon' => 1]);
         
         $newVersion = $originalDokuman->createNewVersion([
             'url' => 'new-path/file.pdf',
@@ -104,6 +104,9 @@ class DokumanTest extends TestCase
         Dokuman::factory()->count(2)->create(['aktif_mi' => false]);
 
         $this->assertEquals(3, Dokuman::active()->count());
+
+        // Veritabanını temizle
+        Dokuman::query()->delete();
 
         // Döküman tipine göre
         Dokuman::factory()->tapu()->count(2)->create();

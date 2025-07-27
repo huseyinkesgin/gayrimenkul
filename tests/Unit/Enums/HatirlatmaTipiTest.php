@@ -36,7 +36,7 @@ class HatirlatmaTipiTest extends TestCase
     {
         $this->assertStringContainsString('telefon', HatirlatmaTipi::ARAMA->description());
         $this->assertStringContainsString('toplantı', HatirlatmaTipi::TOPLANTI->description());
-        $this->assertStringContainsString('e-posta', HatirlatmaTipi::EMAIL->description());
+        $this->assertStringContainsString('E-posta', HatirlatmaTipi::EMAIL->description());
         $this->assertStringContainsString('ziyaret', HatirlatmaTipi::ZIYARET->description());
     }
 

@@ -3,652 +3,637 @@
 namespace App\Services;
 
 use App\Models\Resim;
-use App\Models\Mulk\BaseMulk;
 use App\Enums\ResimKategorisi;
 use App\Enums\MulkKategorisi;
-use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Collection;
 
+/**
+ * Galeri Yönetim Servisi
+ * 
+ * Bu servis gayrimenkul portföy sistemi için galeri yönetimi,
+ * mülk tipine göre galeri kuralları ve organizasyon işlemlerini yönetir.
+ * 
+ * Özellikler:
+ * - Mülk tipine göre galeri kuralları
+ * - Resim sıralama ve organizasyon
+ * - Ana resim yönetimi
+ * - Galeri istatistikleri
+ * - Toplu işlemler
+ */
 class GaleriService
 {
-    /**
-     * Mülk tipine göre izin verilen resim kategorilerini getir
-     */
-    public function getAllowedCategoriesForProperty(string $propertyType): array
+    private ResimUploadService $resimUploadService;
+    private array $galeriKurallari;
+
+    public function __construct(ResimUploadService $resimUploadService)
     {
-        return match ($propertyType) {
-            'arsa' => [
-                ResimKategorisi::MANZARA,
-                ResimKategorisi::UYDU,
-                ResimKategorisi::OZNITELIK,
-                ResimKategorisi::BUYUKSEHIR,
-                ResimKategorisi::EGIM,
-                ResimKategorisi::EIMAR,
-            ],
-            'isyeri' => [
-                ResimKategorisi::KAPAK_RESMI,
-                ResimKategorisi::GALERI,
-                ResimKategorisi::IC_MEKAN,
-                ResimKategorisi::DIS_MEKAN,
-                ResimKategorisi::CEPHE,
-                ResimKategorisi::DETAY,
-                ResimKategorisi::PLAN,
-                ResimKategorisi::UYDU,
-                ResimKategorisi::OZNITELIK,
-                ResimKategorisi::BUYUKSEHIR,
-            ],
-            'konut' => [
-                ResimKategorisi::KAPAK_RESMI,
-                ResimKategorisi::GALERI,
-                ResimKategorisi::IC_MEKAN,
-                ResimKategorisi::DIS_MEKAN,
-                ResimKategorisi::CEPHE,
-                ResimKategorisi::MANZARA,
-                ResimKategorisi::DETAY,
-                ResimKategorisi::PLAN,
-            ],
-            'turistik_tesis' => [
-                ResimKategorisi::KAPAK_RESMI,
-                ResimKategorisi::GALERI,
-                ResimKategorisi::IC_MEKAN,
-                ResimKategorisi::DIS_MEKAN,
-                ResimKategorisi::CEPHE,
-                ResimKategorisi::MANZARA,
-                ResimKategorisi::DETAY,
-                ResimKategorisi::PLAN,
-            ],
-            default => []
-        };
-    }
-
-    /**
-     * Mülk için galeri kurallarını kontrol et
-     */
-    public function validateGalleryRules(BaseMulk $mulk, ResimKategorisi $kategori): array
-    {
-        $errors = [];
-        $propertyType = $mulk->getMulkType();
-        $allowedCategories = $this->getAllowedCategoriesForProperty($propertyType);
-
-        // Kategori kontrolü
-        if (!in_array($kategori, $allowedCategories)) {
-            $errors[] = "Bu mülk tipi için {$kategori->label()} kategorisi desteklenmiyor.";
-        }
-
-        // Kategori bazlı özel kurallar
-        switch ($kategori) {
-            case ResimKategorisi::KAPAK_RESMI:
-                if ($this->hasKapakResmi($mulk)) {
-                    $errors[] = 'Bu mülk için zaten bir kapak resmi mevcut.';
-                }
-                break;
-
-            case ResimKategorisi::GALERI:
-                $galeriCount = $this->getGaleriCount($mulk);
-                if ($galeriCount >= $this->getMaxGaleriCount($propertyType)) {
-                    $maxCount = $this->getMaxGaleriCount($propertyType);
-                    $errors[] = "Bu mülk tipi için maksimum {$maxCount} galeri resmi yüklenebilir.";
-                }
-                break;
-
-            case ResimKategorisi::PLAN:
-                $planCount = $this->getPlanCount($mulk);
-                if ($planCount >= $this->getMaxPlanCount($propertyType)) {
-                    $maxCount = $this->getMaxPlanCount($propertyType);
-                    $errors[] = "Bu mülk tipi için maksimum {$maxCount} plan resmi yüklenebilir.";
-                }
-                break;
-        }
-
-        return $errors;
-    }
-
-    /**
-     * Mülk için galeri organizasyonu oluştur
-     */
-    public function organizeGallery(BaseMulk $mulk): array
-    {
-        $propertyType = $mulk->getMulkType();
-        $allowedCategories = $this->getAllowedCategoriesForProperty($propertyType);
+        $this->resimUploadService = $resimUploadService;
         
-        $gallery = [];
+        // Mülk tipine göre galeri kuralları
+        $this->galeriKurallari = [
+            MulkKategorisi::KONUT->value => [
+                'galeri_aktif' => true,
+                'min_resim' => 3,
+                'max_resim' => 50,
+                'zorunlu_kategoriler' => [
+                    ResimKategorisi::GALERI_DIS_CEPHE,
+                    ResimKategorisi::GALERI_SALON,
+                    ResimKategorisi::GALERI_MUTFAK
+                ],
+                'opsiyonel_kategoriler' => [
+                    ResimKategorisi::GALERI_YATAK_ODASI,
+                    ResimKategorisi::GALERI_BANYO,
+                    ResimKategorisi::GALERI_BALKON,
+                    ResimKategorisi::GALERI_BAHCE
+                ]
+            ],
+            MulkKategorisi::ISYERI->value => [
+                'galeri_aktif' => true,
+                'min_resim' => 2,
+                'max_resim' => 30,
+                'zorunlu_kategoriler' => [
+                    ResimKategorisi::GALERI_DIS_CEPHE,
+                    ResimKategorisi::GALERI_IC_MEKAN
+                ],
+                'opsiyonel_kategoriler' => [
+                    ResimKategorisi::GALERI_OFIS,
+                    ResimKategorisi::GALERI_DEPO,
+                    ResimKategorisi::GALERI_OTOPARK
+                ]
+            ],
+            MulkKategorisi::TURISTIK_TESIS->value => [
+                'galeri_aktif' => true,
+                'min_resim' => 5,
+                'max_resim' => 100,
+                'zorunlu_kategoriler' => [
+                    ResimKategorisi::GALERI_DIS_CEPHE,
+                    ResimKategorisi::GALERI_RESEPSIYON,
+                    ResimKategorisi::GALERI_ODA
+                ],
+                'opsiyonel_kategoriler' => [
+                    ResimKategorisi::GALERI_RESTORAN,
+                    ResimKategorisi::GALERI_HAVUZ,
+                    ResimKategorisi::GALERI_SPA,
+                    ResimKategorisi::GALERI_BAHCE
+                ]
+            ],
+            MulkKategorisi::ARSA->value => [
+                'galeri_aktif' => false,
+                'min_resim' => 0,
+                'max_resim' => 0,
+                'zorunlu_kategoriler' => [],
+                'opsiyonel_kategoriler' => []
+            ]
+        ];
+    }
 
-        foreach ($allowedCategories as $kategori) {
-            $resimler = $mulk->resimler()
-                ->where('kategori', $kategori->value)
-                ->orderBy('siralama')
-                ->orderBy('olusturma_tarihi', 'desc')
-                ->get();
-
-            if ($resimler->isNotEmpty()) {
-                $gallery[$kategori->value] = [
-                    'kategori' => $kategori,
-                    'label' => $kategori->label(),
-                    'description' => $kategori->description(),
-                    'color' => $kategori->color(),
-                    'count' => $resimler->count(),
-                    'resimler' => $resimler,
-                    'sort_priority' => $kategori->sortPriority(),
+    /**
+     * Mülk için galeri oluştur
+     */
+    public function galeriOlustur(string $mulkType, string $mulkId): array
+    {
+        try {
+            $mulkKategorisi = $this->mulkTipindenKategoriBelirle($mulkType);
+            
+            if (!$this->galeriAktifMi($mulkKategorisi)) {
+                return [
+                    'basarili' => false,
+                    'hata' => 'Bu mülk tipi için galeri oluşturulamaz.',
+                    'mulk_tipi' => $mulkKategorisi
                 ];
             }
-        }
 
-        // Sıralama önceliğine göre sırala
-        uasort($gallery, function ($a, $b) {
-            return $a['sort_priority'] <=> $b['sort_priority'];
-        });
-
-        return $gallery;
-    }
-
-    /**
-     * Galeri sıralama güncelle
-     */
-    public function updateGalleryOrder(BaseMulk $mulk, array $imageOrders): bool
-    {
-        try {
-            DB::beginTransaction();
-
-            foreach ($imageOrders as $imageId => $order) {
-                $resim = $mulk->resimler()->where('id', $imageId)->first();
-                if ($resim) {
-                    $resim->update(['siralama' => $order]);
-                }
-            }
-
-            DB::commit();
-            return true;
+            $galeriKurali = $this->galeriKurallari[$mulkKategorisi];
+            
+            return [
+                'basarili' => true,
+                'mulk_id' => $mulkId,
+                'mulk_tipi' => $mulkKategorisi,
+                'kurallar' => $galeriKurali,
+                'mesaj' => 'Galeri başarıyla oluşturuldu.'
+            ];
 
         } catch (\Exception $e) {
-            DB::rollBack();
-            return false;
+            Log::error('Galeri oluşturma hatası: ' . $e->getMessage(), [
+                'mulk_type' => $mulkType,
+                'mulk_id' => $mulkId
+            ]);
+
+            return [
+                'basarili' => false,
+                'hata' => 'Galeri oluşturulurken hata oluştu: ' . $e->getMessage()
+            ];
         }
     }
 
     /**
-     * Kategori içinde sıralama güncelle
+     * Galeri resimlerini getir
      */
-    public function updateCategoryOrder(BaseMulk $mulk, ResimKategorisi $kategori, array $imageIds): bool
+    public function galeriResimleriGetir(
+        string $mulkType,
+        string $mulkId,
+        ResimKategorisi $kategori = null,
+        string $siralama = 'sira_asc'
+    ): array {
+        try {
+            $query = Resim::where('imagable_type', $mulkType)
+                          ->where('imagable_id', $mulkId)
+                          ->where('aktif_mi', true);
+
+            // Kategori filtresi
+            if ($kategori) {
+                $query->where('kategori', $kategori);
+            } else {
+                // Sadece galeri kategorilerini getir
+                $galeriKategorileri = $this->getGaleriKategorileri();
+                $query->whereIn('kategori', $galeriKategorileri);
+            }
+
+            // Sıralama
+            switch ($siralama) {
+                case 'sira_asc':
+                    $query->orderBy('sira', 'asc')->orderBy('created_at', 'asc');
+                    break;
+                case 'sira_desc':
+                    $query->orderBy('sira', 'desc')->orderBy('created_at', 'desc');
+                    break;
+                case 'tarih_asc':
+                    $query->orderBy('created_at', 'asc');
+                    break;
+                case 'tarih_desc':
+                    $query->orderBy('created_at', 'desc');
+                    break;
+                case 'ana_resim':
+                    $query->orderBy('ana_resim_mi', 'desc')->orderBy('sira', 'asc');
+                    break;
+                default:
+                    $query->orderBy('sira', 'asc')->orderBy('created_at', 'asc');
+            }
+
+            $resimler = $query->get();
+            
+            // Resim URL'lerini oluştur
+            $resimlerDetay = $resimler->map(function ($resim) {
+                return [
+                    'id' => $resim->id,
+                    'baslik' => $resim->baslik,
+                    'aciklama' => $resim->aciklama,
+                    'kategori' => $resim->kategori,
+                    'sira' => $resim->sira,
+                    'ana_resim_mi' => $resim->ana_resim_mi,
+                    'boyutlar' => $resim->boyutlar,
+                    'metadata' => $resim->metadata,
+                    'created_at' => $resim->created_at,
+                    'urls' => [
+                        'thumbnail' => $this->resimUploadService->resimUrlOlustur($resim, 'thumbnail'),
+                        'small' => $this->resimUploadService->resimUrlOlustur($resim, 'small'),
+                        'medium' => $this->resimUploadService->resimUrlOlustur($resim, 'medium'),
+                        'large' => $this->resimUploadService->resimUrlOlustur($resim, 'large'),
+                        'original' => $this->resimUploadService->resimUrlOlustur($resim, 'original')
+                    ]
+                ];
+            });
+
+            return [
+                'basarili' => true,
+                'resimler' => $resimlerDetay,
+                'toplam' => $resimler->count(),
+                'siralama' => $siralama,
+                'kategori' => $kategori?->value
+            ];
+
+        } catch (\Exception $e) {
+            Log::error('Galeri resimleri getirme hatası: ' . $e->getMessage(), [
+                'mulk_type' => $mulkType,
+                'mulk_id' => $mulkId
+            ]);
+
+            return [
+                'basarili' => false,
+                'hata' => 'Galeri resimleri getirilirken hata oluştu: ' . $e->getMessage()
+            ];
+        }
+    }
+
+    /**
+     * Ana resim belirle
+     */
+    public function anaResimBelirle(int $resimId, string $mulkType, string $mulkId): array
     {
         try {
             DB::beginTransaction();
 
-            foreach ($imageIds as $index => $imageId) {
-                $resim = $mulk->resimler()
-                    ->where('id', $imageId)
-                    ->where('kategori', $kategori->value)
-                    ->first();
-                
-                if ($resim) {
-                    $newOrder = ($kategori->sortPriority() * 1000) + $index + 1;
-                    $resim->update(['siralama' => $newOrder]);
-                }
+            // Önce tüm resimlerin ana resim durumunu kaldır
+            Resim::where('imagable_type', $mulkType)
+                 ->where('imagable_id', $mulkId)
+                 ->update(['ana_resim_mi' => false]);
+
+            // Seçilen resmi ana resim yap
+            $resim = Resim::find($resimId);
+            if (!$resim) {
+                DB::rollBack();
+                return [
+                    'basarili' => false,
+                    'hata' => 'Resim bulunamadı.'
+                ];
             }
 
+            $resim->update(['ana_resim_mi' => true, 'sira' => 1]);
+
             DB::commit();
-            return true;
+
+            Log::info('Ana resim belirlendi', [
+                'resim_id' => $resimId,
+                'mulk_type' => $mulkType,
+                'mulk_id' => $mulkId
+            ]);
+
+            return [
+                'basarili' => true,
+                'resim' => $resim,
+                'mesaj' => 'Ana resim başarıyla belirlendi.'
+            ];
 
         } catch (\Exception $e) {
             DB::rollBack();
-            return false;
+            Log::error('Ana resim belirleme hatası: ' . $e->getMessage(), [
+                'resim_id' => $resimId,
+                'mulk_type' => $mulkType,
+                'mulk_id' => $mulkId
+            ]);
+
+            return [
+                'basarili' => false,
+                'hata' => 'Ana resim belirlenirken hata oluştu: ' . $e->getMessage()
+            ];
+        }
+    }
+
+    /**
+     * Resim sıralamasını güncelle
+     */
+    public function resimSiralamasiGuncelle(array $resimSiralari): array
+    {
+        try {
+            DB::beginTransaction();
+
+            foreach ($resimSiralari as $sira => $resimId) {
+                Resim::where('id', $resimId)->update(['sira' => $sira + 1]);
+            }
+
+            DB::commit();
+
+            Log::info('Resim sıralaması güncellendi', [
+                'resim_sayisi' => count($resimSiralari)
+            ]);
+
+            return [
+                'basarili' => true,
+                'guncellenen_resim_sayisi' => count($resimSiralari),
+                'mesaj' => 'Resim sıralaması başarıyla güncellendi.'
+            ];
+
+        } catch (\Exception $e) {
+            DB::rollBack();
+            Log::error('Resim sıralama güncelleme hatası: ' . $e->getMessage());
+
+            return [
+                'basarili' => false,
+                'hata' => 'Resim sıralaması güncellenirken hata oluştu: ' . $e->getMessage()
+            ];
         }
     }
 
     /**
      * Galeri istatistikleri
      */
-    public function getGalleryStatistics(BaseMulk $mulk): array
+    public function galeriIstatistikleri(string $mulkType, string $mulkId): array
     {
-        $propertyType = $mulk->getMulkType();
-        $allowedCategories = $this->getAllowedCategoriesForProperty($propertyType);
-        
-        $stats = [
-            'total_images' => 0,
-            'total_size' => 0,
-            'categories' => [],
-            'completion_percentage' => 0,
-            'missing_categories' => [],
-            'recommendations' => [],
-        ];
-
-        $totalImages = 0;
-        $totalSize = 0;
-        $requiredCategories = $this->getRequiredCategories($propertyType);
-        $missingRequired = [];
-
-        foreach ($allowedCategories as $kategori) {
-            $count = $mulk->resimler()
-                ->where('kategori', $kategori->value)
-                ->count();
-
-            $size = $mulk->resimler()
-                ->where('kategori', $kategori->value)
-                ->sum('dosya_boyutu');
-
-            $stats['categories'][$kategori->value] = [
-                'label' => $kategori->label(),
-                'count' => $count,
-                'size' => $size,
-                'formatted_size' => $this->formatBytes($size),
-                'max_allowed' => $this->getMaxCountForCategory($kategori, $propertyType),
-                'is_required' => in_array($kategori, $requiredCategories),
-                'is_complete' => $count > 0,
-            ];
-
-            $totalImages += $count;
-            $totalSize += $size;
-
-            // Zorunlu kategori eksik mi?
-            if (in_array($kategori, $requiredCategories) && $count === 0) {
-                $missingRequired[] = $kategori->label();
-            }
-        }
-
-        $stats['total_images'] = $totalImages;
-        $stats['total_size'] = $totalSize;
-        $stats['formatted_total_size'] = $this->formatBytes($totalSize);
-        $stats['missing_categories'] = $missingRequired;
-
-        // Tamamlanma yüzdesi
-        $completedRequired = count($requiredCategories) - count($missingRequired);
-        $stats['completion_percentage'] = count($requiredCategories) > 0 
-            ? round(($completedRequired / count($requiredCategories)) * 100, 1)
-            : 100;
-
-        // Öneriler
-        $stats['recommendations'] = $this->generateRecommendations($mulk, $stats);
-
-        return $stats;
-    }
-
-    /**
-     * Galeri önizleme oluştur
-     */
-    public function generateGalleryPreview(BaseMulk $mulk, int $limit = 6): array
-    {
-        $preview = [];
-        
-        // Önce kapak resmi
-        $kapakResmi = $mulk->kapakResmi;
-        if ($kapakResmi) {
-            $preview[] = [
-                'resim' => $kapakResmi,
-                'is_cover' => true,
-                'category_label' => 'Kapak Resmi',
-            ];
-        }
-
-        // Sonra diğer kategorilerden
-        $categories = [
-            ResimKategorisi::GALERI,
-            ResimKategorisi::IC_MEKAN,
-            ResimKategorisi::DIS_MEKAN,
-            ResimKategorisi::CEPHE,
-            ResimKategorisi::MANZARA,
-            ResimKategorisi::DETAY,
-        ];
-
-        $remaining = $limit - count($preview);
-        
-        foreach ($categories as $kategori) {
-            if ($remaining <= 0) break;
-
-            $resimler = $mulk->resimler()
-                ->where('kategori', $kategori->value)
-                ->limit($remaining)
-                ->get();
-
-            foreach ($resimler as $resim) {
-                if ($remaining <= 0) break;
-                
-                $preview[] = [
-                    'resim' => $resim,
-                    'is_cover' => false,
-                    'category_label' => $kategori->label(),
+        try {
+            $mulkKategorisi = $this->mulkTipindenKategoriBelirle($mulkType);
+            
+            if (!$this->galeriAktifMi($mulkKategorisi)) {
+                return [
+                    'basarili' => false,
+                    'hata' => 'Bu mülk tipi için galeri mevcut değil.'
                 ];
-                
-                $remaining--;
             }
-        }
 
-        return $preview;
+            $galeriKurali = $this->galeriKurallari[$mulkKategorisi];
+            
+            $resimler = Resim::where('imagable_type', $mulkType)
+                            ->where('imagable_id', $mulkId)
+                            ->where('aktif_mi', true)
+                            ->get();
+
+            $toplamResim = $resimler->count();
+            $anaResim = $resimler->where('ana_resim_mi', true)->first();
+            
+            // Kategori bazında dağılım
+            $kategoriBazindaDagilim = $resimler->groupBy('kategori')
+                                             ->map(function ($grup) {
+                                                 return $grup->count();
+                                             });
+
+            // Eksik kategoriler
+            $mevcutKategoriler = $kategoriBazindaDagilim->keys()->toArray();
+            $zorunluKategoriler = $galeriKurali['zorunlu_kategoriler'];
+            $eksikKategoriler = array_diff($zorunluKategoriler, $mevcutKategoriler);
+
+            // Galeri durumu
+            $galeriTamamMi = empty($eksikKategoriler) && $toplamResim >= $galeriKurali['min_resim'];
+            $galeriDoluMu = $toplamResim >= $galeriKurali['max_resim'];
+
+            return [
+                'basarili' => true,
+                'mulk_tipi' => $mulkKategorisi,
+                'toplam_resim' => $toplamResim,
+                'min_resim' => $galeriKurali['min_resim'],
+                'max_resim' => $galeriKurali['max_resim'],
+                'ana_resim' => $anaResim ? [
+                    'id' => $anaResim->id,
+                    'baslik' => $anaResim->baslik,
+                    'url' => $this->resimUploadService->resimUrlOlustur($anaResim, 'medium')
+                ] : null,
+                'kategori_dagilimi' => $kategoriBazindaDagilim,
+                'zorunlu_kategoriler' => $zorunluKategoriler,
+                'eksik_kategoriler' => $eksikKategoriler,
+                'galeri_tamamlandi' => $galeriTamamMi,
+                'galeri_dolu' => $galeriDoluMu,
+                'doluluk_orani' => $galeriKurali['max_resim'] > 0 ? 
+                    round(($toplamResim / $galeriKurali['max_resim']) * 100, 2) : 0
+            ];
+
+        } catch (\Exception $e) {
+            Log::error('Galeri istatistikleri hatası: ' . $e->getMessage(), [
+                'mulk_type' => $mulkType,
+                'mulk_id' => $mulkId
+            ]);
+
+            return [
+                'basarili' => false,
+                'hata' => 'Galeri istatistikleri alınırken hata oluştu: ' . $e->getMessage()
+            ];
+        }
     }
 
     /**
-     * Galeri arama ve filtreleme
+     * Toplu resim silme
      */
-    public function searchGallery(BaseMulk $mulk, array $filters = []): Collection
+    public function topluResimSil(array $resimIdleri): array
     {
-        $query = $mulk->resimler();
-
-        // Kategori filtresi
-        if (!empty($filters['categories'])) {
-            $query->whereIn('kategori', $filters['categories']);
-        }
-
-        // Tarih aralığı filtresi
-        if (!empty($filters['date_from'])) {
-            $query->where('cekim_tarihi', '>=', $filters['date_from']);
-        }
-
-        if (!empty($filters['date_to'])) {
-            $query->where('cekim_tarihi', '<=', $filters['date_to']);
-        }
-
-        // Boyut filtresi
-        if (!empty($filters['min_width'])) {
-            $query->where('genislik', '>=', $filters['min_width']);
-        }
-
-        if (!empty($filters['min_height'])) {
-            $query->where('yukseklik', '>=', $filters['min_height']);
-        }
-
-        // Dosya boyutu filtresi
-        if (!empty($filters['min_file_size'])) {
-            $query->where('dosya_boyutu', '>=', $filters['min_file_size']);
-        }
-
-        if (!empty($filters['max_file_size'])) {
-            $query->where('dosya_boyutu', '<=', $filters['max_file_size']);
-        }
-
-        // Onay durumu filtresi
-        if (!empty($filters['approval_status'])) {
-            $query->where('onay_durumu', $filters['approval_status']);
-        }
-
-        // Etiket filtresi
-        if (!empty($filters['tags'])) {
-            foreach ($filters['tags'] as $tag) {
-                $query->whereJsonContains('etiketler', $tag);
-            }
-        }
-
-        // Sıralama
-        $sortBy = $filters['sort_by'] ?? 'siralama';
-        $sortDirection = $filters['sort_direction'] ?? 'asc';
-        
-        $query->orderBy($sortBy, $sortDirection);
-
-        return $query->get();
-    }
-
-    /**
-     * Toplu galeri işlemleri
-     */
-    public function bulkGalleryOperation(BaseMulk $mulk, string $operation, array $imageIds, array $data = []): array
-    {
-        $results = [];
-        $successCount = 0;
-        $errorCount = 0;
-
         try {
             DB::beginTransaction();
 
-            foreach ($imageIds as $imageId) {
-                $resim = $mulk->resimler()->where('id', $imageId)->first();
-                
-                if (!$resim) {
-                    $results[] = [
-                        'image_id' => $imageId,
-                        'success' => false,
-                        'message' => 'Resim bulunamadı'
-                    ];
-                    $errorCount++;
-                    continue;
-                }
+            $silinenSayisi = 0;
+            $hataliSayisi = 0;
+            $hatalar = [];
 
-                $result = $this->performSingleOperation($resim, $operation, $data);
-                $results[] = array_merge($result, ['image_id' => $imageId]);
-                
-                if ($result['success']) {
-                    $successCount++;
+            foreach ($resimIdleri as $resimId) {
+                $resim = Resim::find($resimId);
+                if ($resim) {
+                    if ($this->resimUploadService->resimSil($resim)) {
+                        $silinenSayisi++;
+                    } else {
+                        $hataliSayisi++;
+                        $hatalar[] = "Resim ID {$resimId} silinemedi";
+                    }
                 } else {
-                    $errorCount++;
+                    $hataliSayisi++;
+                    $hatalar[] = "Resim ID {$resimId} bulunamadı";
                 }
             }
 
             DB::commit();
 
+            Log::info('Toplu resim silme tamamlandı', [
+                'toplam' => count($resimIdleri),
+                'silinen' => $silinenSayisi,
+                'hatali' => $hataliSayisi
+            ]);
+
+            return [
+                'basarili' => true,
+                'toplam' => count($resimIdleri),
+                'silinen' => $silinenSayisi,
+                'hatali' => $hataliSayisi,
+                'hatalar' => $hatalar,
+                'mesaj' => "{$silinenSayisi} resim başarıyla silindi."
+            ];
+
         } catch (\Exception $e) {
             DB::rollBack();
+            Log::error('Toplu resim silme hatası: ' . $e->getMessage());
+
             return [
-                'success' => false,
-                'message' => 'Toplu işlem hatası: ' . $e->getMessage()
+                'basarili' => false,
+                'hata' => 'Toplu resim silme işleminde hata oluştu: ' . $e->getMessage()
             ];
         }
+    }
 
+    /**
+     * Galeri organizasyonu öner
+     */
+    public function galeriOrganizasyonuOner(string $mulkType, string $mulkId): array
+    {
+        try {
+            $mulkKategorisi = $this->mulkTipindenKategoriBelirle($mulkType);
+            
+            if (!$this->galeriAktifMi($mulkKategorisi)) {
+                return [
+                    'basarili' => false,
+                    'hata' => 'Bu mülk tipi için galeri mevcut değil.'
+                ];
+            }
+
+            $resimler = Resim::where('imagable_type', $mulkType)
+                            ->where('imagable_id', $mulkId)
+                            ->where('aktif_mi', true)
+                            ->get();
+
+            $oneriler = [];
+            $galeriKurali = $this->galeriKurallari[$mulkKategorisi];
+
+            // Ana resim önerisi
+            if (!$resimler->where('ana_resim_mi', true)->count()) {
+                $disCepheResmi = $resimler->where('kategori', ResimKategorisi::GALERI_DIS_CEPHE)->first();
+                if ($disCepheResmi) {
+                    $oneriler[] = [
+                        'tip' => 'ana_resim',
+                        'mesaj' => 'Dış cephe resmi ana resim olarak belirlenebilir.',
+                        'resim_id' => $disCepheResmi->id,
+                        'oncelik' => 'yuksek'
+                    ];
+                }
+            }
+
+            // Eksik kategori önerileri
+            $mevcutKategoriler = $resimler->pluck('kategori')->unique()->toArray();
+            $zorunluKategoriler = $galeriKurali['zorunlu_kategoriler'];
+            $eksikKategoriler = array_diff($zorunluKategoriler, $mevcutKategoriler);
+
+            foreach ($eksikKategoriler as $kategori) {
+                $oneriler[] = [
+                    'tip' => 'eksik_kategori',
+                    'mesaj' => "'{$kategori}' kategorisinde resim eklenmesi önerilir.",
+                    'kategori' => $kategori,
+                    'oncelik' => 'orta'
+                ];
+            }
+
+            // Sıralama önerisi
+            $siralanmamisResimler = $resimler->where('sira', 0)->count();
+            if ($siralanmamisResimler > 0) {
+                $oneriler[] = [
+                    'tip' => 'siralama',
+                    'mesaj' => "{$siralanmamisResimler} resimin sıralaması yapılmamış.",
+                    'resim_sayisi' => $siralanmamisResimler,
+                    'oncelik' => 'dusuk'
+                ];
+            }
+
+            // Fazla resim uyarısı
+            if ($resimler->count() > $galeriKurali['max_resim']) {
+                $fazlaResim = $resimler->count() - $galeriKurali['max_resim'];
+                $oneriler[] = [
+                    'tip' => 'fazla_resim',
+                    'mesaj' => "Galeri limitini {$fazlaResim} resim aşıyor.",
+                    'fazla_resim_sayisi' => $fazlaResim,
+                    'oncelik' => 'orta'
+                ];
+            }
+
+            return [
+                'basarili' => true,
+                'oneriler' => $oneriler,
+                'oneri_sayisi' => count($oneriler),
+                'galeri_durumu' => $this->galeriIstatistikleri($mulkType, $mulkId)
+            ];
+
+        } catch (\Exception $e) {
+            Log::error('Galeri organizasyon önerisi hatası: ' . $e->getMessage(), [
+                'mulk_type' => $mulkType,
+                'mulk_id' => $mulkId
+            ]);
+
+            return [
+                'basarili' => false,
+                'hata' => 'Galeri organizasyon önerisi alınırken hata oluştu: ' . $e->getMessage()
+            ];
+        }
+    }
+
+    /**
+     * Mülk tipinden kategori belirle
+     */
+    private function mulkTipindenKategoriBelirle(string $mulkType): string
+    {
+        // Model adından kategori çıkar
+        $modelAdi = class_basename($mulkType);
+        
+        // Konut kategorisi kontrolleri
+        $konutTipleri = ['Daire', 'Villa', 'Rezidans', 'Yali', 'Yazlik'];
+        if (in_array($modelAdi, $konutTipleri)) {
+            return MulkKategorisi::KONUT->value;
+        }
+
+        // İşyeri kategorisi kontrolleri
+        $isyeriTipleri = ['Depo', 'Fabrika', 'Magaza', 'Ofis', 'Dukkan'];
+        if (in_array($modelAdi, $isyeriTipleri)) {
+            return MulkKategorisi::ISYERI->value;
+        }
+
+        // Turistik tesis kategorisi kontrolleri
+        $turistikTipleri = ['ButikOtel', 'ApartOtel', 'Hotel', 'Motel', 'TatilKoyu'];
+        if (in_array($modelAdi, $turistikTipleri)) {
+            return MulkKategorisi::TURISTIK_TESIS->value;
+        }
+
+        // Arsa kategorisi kontrolleri
+        $arsaTipleri = ['TicariArsa', 'SanayiArsasi', 'KonutArsasi'];
+        if (in_array($modelAdi, $arsaTipleri)) {
+            return MulkKategorisi::ARSA->value;
+        }
+
+        // Varsayılan olarak konut
+        return MulkKategorisi::KONUT->value;
+    }
+
+    /**
+     * Galeri aktif mi kontrol et
+     */
+    private function galeriAktifMi(string $mulkKategorisi): bool
+    {
+        return $this->galeriKurallari[$mulkKategorisi]['galeri_aktif'] ?? false;
+    }
+
+    /**
+     * Galeri kategorilerini getir
+     */
+    private function getGaleriKategorileri(): array
+    {
         return [
-            'success' => $errorCount === 0,
-            'results' => $results,
-            'summary' => [
-                'total' => count($imageIds),
-                'success' => $successCount,
-                'error' => $errorCount,
-            ]
+            ResimKategorisi::GALERI_DIS_CEPHE,
+            ResimKategorisi::GALERI_SALON,
+            ResimKategorisi::GALERI_MUTFAK,
+            ResimKategorisi::GALERI_YATAK_ODASI,
+            ResimKategorisi::GALERI_BANYO,
+            ResimKategorisi::GALERI_BALKON,
+            ResimKategorisi::GALERI_BAHCE,
+            ResimKategorisi::GALERI_IC_MEKAN,
+            ResimKategorisi::GALERI_OFIS,
+            ResimKategorisi::GALERI_DEPO,
+            ResimKategorisi::GALERI_OTOPARK,
+            ResimKategorisi::GALERI_RESEPSIYON,
+            ResimKategorisi::GALERI_ODA,
+            ResimKategorisi::GALERI_RESTORAN,
+            ResimKategorisi::GALERI_HAVUZ,
+            ResimKategorisi::GALERI_SPA
         ];
     }
 
     /**
-     * Galeri yedekleme
+     * Mülk tipi için uygun kategorileri getir
      */
-    public function backupGallery(BaseMulk $mulk): array
+    public function mulkTipiIcinKategorileriGetir(string $mulkType): array
     {
-        try {
-            $resimler = $mulk->resimler;
-            $backupData = [];
-
-            foreach ($resimler as $resim) {
-                $backupData[] = [
-                    'id' => $resim->id,
-                    'kategori' => $resim->kategori,
-                    'baslik' => $resim->baslik,
-                    'aciklama' => $resim->aciklama,
-                    'dosya_adi' => $resim->dosya_adi,
-                    'url' => $resim->url,
-                    'siralama' => $resim->siralama,
-                    'etiketler' => $resim->etiketler,
-                    'metadata' => [
-                        'boyutlar' => $resim->dimensions,
-                        'dosya_boyutu' => $resim->dosya_boyutu,
-                        'mime_type' => $resim->mime_type,
-                        'cekim_tarihi' => $resim->cekim_tarihi,
-                        'exif_data' => $resim->exif_data,
-                    ]
-                ];
-            }
-
-            $backupPath = "gallery_backups/mulk_{$mulk->id}_" . now()->format('Y-m-d_H-i-s') . '.json';
-            \Storage::disk('local')->put($backupPath, json_encode($backupData, JSON_PRETTY_PRINT));
-
+        $mulkKategorisi = $this->mulkTipindenKategoriBelirle($mulkType);
+        
+        if (!$this->galeriAktifMi($mulkKategorisi)) {
             return [
-                'success' => true,
-                'backup_path' => $backupPath,
-                'image_count' => count($backupData),
-                'message' => 'Galeri başarıyla yedeklendi'
-            ];
-
-        } catch (\Exception $e) {
-            return [
-                'success' => false,
-                'message' => 'Yedekleme hatası: ' . $e->getMessage()
+                'basarili' => false,
+                'hata' => 'Bu mülk tipi için galeri mevcut değil.'
             ];
         }
+
+        $galeriKurali = $this->galeriKurallari[$mulkKategorisi];
+        
+        return [
+            'basarili' => true,
+            'mulk_tipi' => $mulkKategorisi,
+            'zorunlu_kategoriler' => $galeriKurali['zorunlu_kategoriler'],
+            'opsiyonel_kategoriler' => $galeriKurali['opsiyonel_kategoriler'],
+            'tum_kategoriler' => array_merge(
+                $galeriKurali['zorunlu_kategoriler'],
+                $galeriKurali['opsiyonel_kategoriler']
+            )
+        ];
     }
 
     /**
-     * Helper metodlar
+     * Galeri kurallarını getir
      */
-    private function hasKapakResmi(BaseMulk $mulk): bool
+    public function galeriKurallariniGetir(string $mulkType): array
     {
-        return $mulk->kapakResmi !== null;
-    }
-
-    private function getGaleriCount(BaseMulk $mulk): int
-    {
-        return $mulk->galeriResimleri()->count();
-    }
-
-    private function getPlanCount(BaseMulk $mulk): int
-    {
-        return $mulk->planResimleri()->count();
-    }
-
-    private function getMaxGaleriCount(string $propertyType): int
-    {
-        return match ($propertyType) {
-            'arsa' => 5,
-            'isyeri' => 20,
-            'konut' => 15,
-            'turistik_tesis' => 30,
-            default => 10
-        };
-    }
-
-    private function getMaxPlanCount(string $propertyType): int
-    {
-        return match ($propertyType) {
-            'arsa' => 0,
-            'isyeri' => 5,
-            'konut' => 3,
-            'turistik_tesis' => 10,
-            default => 1
-        };
-    }
-
-    private function getMaxCountForCategory(ResimKategorisi $kategori, string $propertyType): int
-    {
-        return match ($kategori) {
-            ResimKategorisi::KAPAK_RESMI => 1,
-            ResimKategorisi::GALERI => $this->getMaxGaleriCount($propertyType),
-            ResimKategorisi::PLAN => $this->getMaxPlanCount($propertyType),
-            ResimKategorisi::IC_MEKAN => 10,
-            ResimKategorisi::DIS_MEKAN => 8,
-            ResimKategorisi::CEPHE => 5,
-            ResimKategorisi::MANZARA => 5,
-            ResimKategorisi::DETAY => 15,
-            default => 3
-        };
-    }
-
-    private function getRequiredCategories(string $propertyType): array
-    {
-        return match ($propertyType) {
-            'arsa' => [ResimKategorisi::MANZARA],
-            'isyeri' => [ResimKategorisi::KAPAK_RESMI, ResimKategorisi::DIS_MEKAN],
-            'konut' => [ResimKategorisi::KAPAK_RESMI, ResimKategorisi::IC_MEKAN],
-            'turistik_tesis' => [ResimKategorisi::KAPAK_RESMI, ResimKategorisi::IC_MEKAN, ResimKategorisi::DIS_MEKAN],
-            default => []
-        };
-    }
-
-    private function generateRecommendations(BaseMulk $mulk, array $stats): array
-    {
-        $recommendations = [];
-
-        // Eksik zorunlu kategoriler
-        if (!empty($stats['missing_categories'])) {
-            $recommendations[] = [
-                'type' => 'missing_required',
-                'priority' => 'high',
-                'message' => 'Eksik zorunlu kategoriler: ' . implode(', ', $stats['missing_categories'])
-            ];
-        }
-
-        // Kapak resmi eksik
-        if (!$this->hasKapakResmi($mulk)) {
-            $recommendations[] = [
-                'type' => 'missing_cover',
-                'priority' => 'high',
-                'message' => 'Kapak resmi eklemeniz önerilir'
-            ];
-        }
-
-        // Az resim var
-        if ($stats['total_images'] < 3) {
-            $recommendations[] = [
-                'type' => 'low_image_count',
-                'priority' => 'medium',
-                'message' => 'Daha fazla resim eklemeniz önerilir (minimum 3 resim)'
-            ];
-        }
-
-        // Büyük dosya boyutları
-        if ($stats['total_size'] > 50 * 1024 * 1024) { // 50MB
-            $recommendations[] = [
-                'type' => 'large_file_size',
-                'priority' => 'low',
-                'message' => 'Dosya boyutlarını optimize etmeniz önerilir'
-            ];
-        }
-
-        return $recommendations;
-    }
-
-    private function performSingleOperation(Resim $resim, string $operation, array $data): array
-    {
-        try {
-            switch ($operation) {
-                case 'update_category':
-                    $resim->update(['kategori' => $data['category']]);
-                    return ['success' => true, 'message' => 'Kategori güncellendi'];
-
-                case 'update_title':
-                    $resim->update(['baslik' => $data['title']]);
-                    return ['success' => true, 'message' => 'Başlık güncellendi'];
-
-                case 'update_description':
-                    $resim->update(['aciklama' => $data['description']]);
-                    return ['success' => true, 'message' => 'Açıklama güncellendi'];
-
-                case 'add_tags':
-                    $currentTags = $resim->etiketler ?? [];
-                    $newTags = array_unique(array_merge($currentTags, $data['tags']));
-                    $resim->update(['etiketler' => $newTags]);
-                    return ['success' => true, 'message' => 'Etiketler eklendi'];
-
-                case 'remove_tags':
-                    $currentTags = $resim->etiketler ?? [];
-                    $newTags = array_diff($currentTags, $data['tags']);
-                    $resim->update(['etiketler' => array_values($newTags)]);
-                    return ['success' => true, 'message' => 'Etiketler kaldırıldı'];
-
-                case 'approve':
-                    $resim->approve(auth()->id());
-                    return ['success' => true, 'message' => 'Resim onaylandı'];
-
-                case 'reject':
-                    $resim->reject(auth()->id(), $data['reason'] ?? null);
-                    return ['success' => true, 'message' => 'Resim reddedildi'];
-
-                case 'deactivate':
-                    $resim->update(['aktif_mi' => false]);
-                    return ['success' => true, 'message' => 'Resim pasif hale getirildi'];
-
-                case 'activate':
-                    $resim->update(['aktif_mi' => true]);
-                    return ['success' => true, 'message' => 'Resim aktif hale getirildi'];
-
-                default:
-                    return ['success' => false, 'message' => 'Geçersiz işlem'];
-            }
-
-        } catch (\Exception $e) {
-            return ['success' => false, 'message' => 'İşlem hatası: ' . $e->getMessage()];
-        }
-    }
-
-    private function formatBytes(int $bytes): string
-    {
-        if ($bytes >= 1073741824) {
-            return number_format($bytes / 1073741824, 2) . ' GB';
-        } elseif ($bytes >= 1048576) {
-            return number_format($bytes / 1048576, 2) . ' MB';
-        } elseif ($bytes >= 1024) {
-            return number_format($bytes / 1024, 2) . ' KB';
-        } else {
-            return $bytes . ' bytes';
-        }
+        $mulkKategorisi = $this->mulkTipindenKategoriBelirle($mulkType);
+        
+        return [
+            'basarili' => true,
+            'mulk_tipi' => $mulkKategorisi,
+            'kurallar' => $this->galeriKurallari[$mulkKategorisi] ?? null
+        ];
     }
 }

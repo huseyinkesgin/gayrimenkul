@@ -370,7 +370,7 @@ class MusteriHizmet extends BaseModel
             return 'Takip Bekliyor';
         }
 
-        if ($this->sonuc_tipi?->requiresFollowUp()) {
+        if ($this->sonuc_tipi?->needsFollowUp()) {
             return 'Takip Gerekli';
         }
 
@@ -590,9 +590,9 @@ class MusteriHizmet extends BaseModel
     }
 
     /**
-     * Lokasyona göre scope
+     * Hizmet lokasyonuna göre scope
      */
-    public function scopeByLocation($query, string $location)
+    public function scopeByServiceLocation($query, string $location)
     {
         return $query->where('lokasyon', 'like', "%{$location}%");
     }
@@ -667,17 +667,17 @@ class MusteriHizmet extends BaseModel
         $rules = [];
 
         // Süre gerektiren hizmetler
-        if ($this->hizmet_tipi->requiresDuration()) {
+        if ($this->hizmet_tipi->needsDuration()) {
             $rules['sure_dakika'] = 'required|integer|min:1|max:1440';
         }
 
         // Lokasyon gerektiren hizmetler
-        if ($this->hizmet_tipi->requiresLocation()) {
+        if ($this->hizmet_tipi->needsLocation()) {
             $rules['lokasyon'] = 'required|string|max:255';
         }
 
         // Katılımcı gerektiren hizmetler
-        if ($this->hizmet_tipi->requiresParticipants()) {
+        if ($this->hizmet_tipi->needsParticipants()) {
             $rules['katilimcilar'] = 'required|array|min:1';
         }
 

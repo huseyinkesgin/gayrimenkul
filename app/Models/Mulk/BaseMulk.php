@@ -11,9 +11,12 @@ use App\Enums\MulkKategorisi;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Validation\Rule;
+use App\Traits\HasTalepEslestirme;
 
 abstract class BaseMulk extends BaseModel
 {
+    use HasTalepEslestirme;
+    
     protected $table = 'mulkler';
 
     protected $fillable = [
@@ -139,6 +142,31 @@ abstract class BaseMulk extends BaseModel
     {
         return $this->hasMany(MusteriHizmet::class, 'mulk_id')
             ->where('mulk_type', $this->getMulkType());
+    }
+
+    /**
+     * Bu mülk için talep eşleştirmeleri
+     */
+    public function talepEslestirmeleri(): HasMany
+    {
+        return $this->hasMany(\App\Models\TalepPortfoyEslestirme::class, 'mulk_id')
+            ->where('mulk_type', $this->getMulkType());
+    }
+
+    /**
+     * Bu mülk için aktif talep eşleştirmeleri
+     */
+    public function aktifTalepEslestirmeleri(): HasMany
+    {
+        return $this->talepEslestirmeleri()->where('aktif_mi', true);
+    }
+
+    /**
+     * Bu mülk için adres ilişkisi (polymorphic)
+     */
+    public function adresler()
+    {
+        return $this->morphMany(\App\Models\Adres::class, 'addressable');
     }
 
     /**

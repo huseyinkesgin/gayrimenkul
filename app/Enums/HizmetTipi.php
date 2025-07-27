@@ -131,7 +131,7 @@ enum HizmetTipi: string
     /**
      * Bu hizmet tipi süre gerektirir mi?
      */
-    public function requiresDuration(): bool
+    public function needsDuration(): bool
     {
         return in_array($this, self::requiresDuration());
     }
@@ -139,7 +139,7 @@ enum HizmetTipi: string
     /**
      * Bu hizmet tipi lokasyon gerektirir mi?
      */
-    public function requiresLocation(): bool
+    public function needsLocation(): bool
     {
         return in_array($this, self::requiresLocation());
     }
@@ -147,7 +147,7 @@ enum HizmetTipi: string
     /**
      * Bu hizmet tipi katılımcı gerektirir mi?
      */
-    public function requiresParticipants(): bool
+    public function needsParticipants(): bool
     {
         return in_array($this, self::requiresParticipants());
     }
@@ -205,9 +205,9 @@ enum HizmetTipi: string
             'description' => $case->description(),
             'color' => $case->color(),
             'icon' => $case->icon(),
-            'requires_duration' => $case->requiresDuration(),
-            'requires_location' => $case->requiresLocation(),
-            'requires_participants' => $case->requiresParticipants(),
+            'requires_duration' => $case->needsDuration(),
+            'requires_location' => $case->needsLocation(),
+            'requires_participants' => $case->needsParticipants(),
             'is_communication' => $case->isCommunication(),
             'is_physical' => $case->isPhysical(),
         ], self::cases());
